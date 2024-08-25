@@ -1,24 +1,14 @@
 //! Peek TLS Stream
 
-use std::{
-    collections::HashSet,
-    sync::{Arc, OnceLock},
-};
-
 use anyhow::{anyhow, bail, Result};
 use tokio::net::TcpStream;
 
-static TARGET_HOSTS: OnceLock<Arc<HashSet<String, ahash::RandomState>>> = OnceLock::new();
+use crate::config::TARGET_HOSTS;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Peeker;
 
 impl Peeker {
-    /// Initialize the target hosts set.
-    pub fn init(target_hosts: Vec<String>) {
-        TARGET_HOSTS.get_or_init(|| Arc::new(HashSet::from_iter(target_hosts)));
-    }
-
     #[inline]
     /// Peek the stream (maybe tls stream) and see if it contains any of the target hosts.
     pub async fn is_target_host(stream: &mut TcpStream) -> Result<bool> {
@@ -99,6 +89,7 @@ impl Peeker {
                 TARGET_HOSTS
                     .get()
                     .expect("TARGET_HOSTS must be inititalized before usage")
+                    .load()
                     .contains(sni)
             }) {
                 tracing::debug!(

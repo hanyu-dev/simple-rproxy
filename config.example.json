@@ -1,0 +1,8 @@
+{
+  "listen": "0.0.0.0:443",
+  "default_upstream": "127.0.0.1:443",
+  "target_host": [
+    "example.com"
+  ],
+  "target_upstream": "127.0.0.1:443"
+}

@@ -1,158 +1,171 @@
-mod args;
+mod config;
 mod peek;
+mod relay;
 mod utils;
 
-use std::{net::SocketAddr, sync::LazyLock, time::Duration};
+use std::{
+    io,
+    sync::{Arc, OnceLock},
+};
 
 use anyhow::Result;
-use clap::Parser;
+use arc_swap::ArcSwap;
 use mimalloc::MiMalloc;
-use tokio::net::{TcpSocket, TcpStream};
+use tokio::task::JoinHandle;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-static KEEP_ALIVE_CONF: LazyLock<socket2::TcpKeepalive> = LazyLock::new(|| {
-    socket2::TcpKeepalive::new()
-        .with_time(Duration::from_secs(15))
-        .with_interval(Duration::from_secs(15))
-});
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
+    utils::init_tracing();
     tracing::info!("{} built at {}", utils::VERSION, utils::BUILD_TIME);
 
-    let args = args::Args::parse();
-    tracing::debug!("\n### Accept args ### \n{:#?}\n######", args);
+    // init global config from cmdline args or config file
+    config::Args::try_init()?;
 
-    peek::Peeker::init(args.target_host);
+    // create relay server.
+    create_server().await?;
 
-    let listener = {
-        let socket = match args.listen {
-            SocketAddr::V4(_) => TcpSocket::new_v4()?,
-            SocketAddr::V6(_) => TcpSocket::new_v6()?,
-        };
+    #[cfg(unix)]
+    // install signal handler for SIGHUP
+    reload_handle().await;
 
-        // Setting with socket2
-        {
-            let sock_ref = socket2::SockRef::from(&socket);
+    // wait for termination signal
+    termination_handle().await;
 
-            #[cfg(unix)]
-            let _ = sock_ref.set_cloexec(true);
-            let _ = sock_ref.set_tcp_keepalive(&KEEP_ALIVE_CONF);
-            let _ = sock_ref.set_nodelay(true);
-            let _ = sock_ref.set_nonblocking(true);
-        }
+    Ok(())
+}
 
-        socket.bind(args.listen)?;
-        socket.listen(4096)?
+/// [JoinHandle] after spawning the server.
+static SERVER_HANDLE: OnceLock<ArcSwap<(JoinHandle<()>, utils::ConnCounter)>> = OnceLock::new();
+
+#[inline]
+async fn create_server() -> Result<()> {
+    let listener = utils::create_listener()?;
+
+    let conn_counter = utils::ConnCounter::new();
+    let handler = {
+        let conn_counter = conn_counter.clone();
+        tokio::spawn(async move {
+            loop {
+                let mut incoming = match listener.accept().await {
+                    Ok((incoming, addr)) => {
+                        tracing::debug!("Connection from [{addr}] accepted");
+                        incoming
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => {
+                        tracing::debug!("Conn aborted.");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to accept: {}", e);
+                        break;
+                    }
+                };
+
+                let conn_counter = conn_counter.clone();
+                tokio::spawn(async move {
+                    conn_counter.conn_established();
+
+                    let relay_conn = {
+                        let args = get_args!();
+                        let upstream = if peek::Peeker::is_target_host(&mut incoming)
+                            .await
+                            .inspect_err(|e| {
+                                tracing::error!("Error when peeking target host: {:?}", e);
+                            })
+                            .unwrap_or_default()
+                        {
+                            args.target_upstream.as_ref().unwrap()
+                        } else {
+                            args.default_upstream.as_ref().unwrap()
+                        };
+
+                        match relay::RelayConn::new(upstream).await {
+                            Ok(relay_conn) => relay_conn,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to connect to upstream {:?}: {:?}",
+                                    upstream,
+                                    e
+                                );
+                                return;
+                            }
+                        }
+                    };
+
+                    let _ = relay_conn.relay_io(incoming).await;
+                });
+            }
+        })
     };
 
-    loop {
-        let (mut incoming, addr) = match listener.accept().await {
-            Ok(ok) => ok,
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionAborted => {
-                tracing::warn!("Failed to accept: {}", e);
-                continue;
-            }
-            Err(e) => {
-                tracing::error!("Failed to accept: {}", e);
-                break;
-            }
-        };
-
-        tracing::debug!("Incoming connection from: {}", addr);
-
+    if let Err(last) = SERVER_HANDLE.set(ArcSwap::from(Arc::new((handler, conn_counter)))) {
         tokio::spawn(async move {
-            let upstream = if peek::Peeker::is_target_host(&mut incoming)
-                .await
-                .inspect_err(|e| {
-                    tracing::error!("Error when peeking target host: {:?}", e);
-                })
-                .unwrap_or_default()
-            {
-                args.target_upstream
-            } else {
-                args.default_upstream
-            };
-
-            if let Err(e) = match upstream {
-                utils::Upstream::SocketAddr(upstream_addr) => {
-                    match TcpStream::connect(upstream_addr).await {
-                        Ok(mut dest_stream) => {
-                            {
-                                let sock_ref = socket2::SockRef::from(&dest_stream);
-
-                                #[cfg(unix)]
-                                let _ = sock_ref.set_cloexec(true);
-                                let _ = sock_ref.set_tcp_keepalive(&KEEP_ALIVE_CONF);
-                                let _ = sock_ref.set_nodelay(true);
-                                let _ = sock_ref.set_nonblocking(true);
-                            }
-
-                            #[cfg(target_os = "linux")]
-                            match realm_io::bidi_zero_copy(&mut incoming, &mut dest_stream).await {
-                                Ok(_) => Ok(()),
-                                Err(ref e) if e.kind() == ErrorKind::InvalidInput => {
-                                    realm_io::bidi_copy(&mut incoming, &mut dest_stream)
-                                        .await
-                                        .map(|_| ())
-                                }
-                                Err(e) => Err(e),
-                            }
-                            #[cfg(not(target_os = "linux"))]
-                            realm_io::bidi_copy(&mut incoming, &mut dest_stream)
-                                .await
-                                .map(|_| ())
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
-                #[cfg(unix)]
-                utils::Upstream::Unix(unix_path) => {
-                    match tokio::net::UnixStream::connect(unix_path).await {
-                        Ok(mut dest_stream) => {
-                            #[cfg(target_os = "linux")]
-                            match realm_io::bidi_zero_copy(&mut incoming, &mut dest_stream).await {
-                                Ok(_) => Ok(()),
-                                Err(ref e) if e.kind() == ErrorKind::InvalidInput => {
-                                    realm_io::bidi_copy(&mut incoming, &mut dest_stream)
-                                        .await
-                                        .map(|_| ())
-                                }
-                                Err(e) => Err(e),
-                            }
-                            #[cfg(not(target_os = "linux"))]
-                            realm_io::bidi_copy(&mut incoming, &mut dest_stream)
-                                .await
-                                .map(|_| ())
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
-                #[cfg(not(unix))]
-                utils::Upstream::Unix(_) => {
-                    unreachable!("Unix socket is not supported on non-unix platform")
-                }
-            } {
-                tracing::error!("Failed to establish relay connection for {addr}: {}", e);
-            }
+            let last = last.into_inner();
+            last.1.wait_conn_end(None).await;
+            last.0.abort();
         });
     }
 
     Ok(())
 }
 
-fn init_tracing() {
-    use tracing_subscriber::{
-        filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
+#[cfg(unix)]
+/// Create a signal handler for SIGHUP to gracefully reload server.
+async fn reload_handle() {
+    use tokio::signal;
+
+    tokio::spawn(async move {
+        loop {
+            signal::unix::signal(signal::unix::SignalKind::hangup())
+                .expect("failed to install signal handler")
+                .recv()
+                .await;
+
+            tracing::info!("SIGHUP received, reloading config...");
+            let need_restart = config::Args::reload_config().unwrap_or_else(|e| {
+                tracing::error!("Failed to reload config: {e}");
+                false
+            });
+
+            if need_restart {
+                tracing::info!("Gracefully restarting server...");
+
+                if let Err(e) = create_server().await {
+                    tracing::error!("Failed to restart server: {e}");
+                }
+            }
+        }
+    });
+}
+
+/// `shutdown_signal` will inform axum to gracefully shutdown when the process is asked to shutdown.
+async fn termination_handle() {
+    use tokio::signal;
+
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
     };
 
-    let fmt_layer = tracing_subscriber::fmt::layer().with_filter(
-        EnvFilter::builder()
-            .with_default_directive(LevelFilter::DEBUG.into())
-            .from_env_lossy(),
-    );
-    tracing_subscriber::registry().with(fmt_layer).init();
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+
+    tracing::info!("signal received, shutdown");
 }
