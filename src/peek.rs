@@ -137,11 +137,11 @@ impl Peeker {
                     .ok_or(anyhow!(
                         "SNI extension length is not correct. Full peek: {:02x?}",
                         bytes
-                    ))?;
+                    ))?
+                    .get(5..)
+                    .unwrap_or(&[]);
 
-                return Ok(Some(unsafe {
-                    std::str::from_utf8_unchecked(&server_name[5..])
-                }));
+                return Ok(Some(unsafe { std::str::from_utf8_unchecked(server_name) }));
             }
 
             *cursor += extension_length;
