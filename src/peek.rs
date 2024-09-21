@@ -5,24 +5,28 @@ use tokio::net::TcpStream;
 
 use crate::{config::TARGET_HOSTS, error::Error};
 
+#[derive(Debug, Clone, Copy)]
+/// Peek result
+pub enum PeekResult {
+    /// The stream is not a HTTPS stream.
+    NotHTTPS,
+
+    /// The stream is a TLS stream but not matched any target hosts.
+    NotMatched,
+
+    /// The stream is a TLS stream and matched a target host.
+    Matched,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Peeker;
 
 impl Peeker {
     #[inline]
-    #[tracing::instrument(
-        level = "debug",
-        skip(stream),
-        fields(
-            remote_addr = ?stream.peer_addr()
-        ),
-        ret
-    )]
     /// Peek the stream (maybe tls stream) and see if it contains any of the target hosts.
-    pub async fn is_target_host(stream: &mut TcpStream) -> Result<bool> {
+    pub async fn is_target_host(stream: &mut TcpStream) -> Result<PeekResult> {
         if Self::try_peek::<1>(stream).await[0] != 0x16 {
-            tracing::debug!("Not a TLS stream.");
-            return Ok(false);
+            return Ok(PeekResult::NotHTTPS);
         }
 
         let buf = Self::try_peek::<1024>(stream).await;
@@ -71,7 +75,7 @@ impl Peeker {
                     "Compression method is not null but {:?}",
                     &buf[cursor..cursor + 1]
                 );
-                return Ok(false);
+                bail!(Error::ClientHello("compression method is not null"));
             }
             0
         });
@@ -101,11 +105,14 @@ impl Peeker {
                     .load()
                     .contains(sni)
             }) {
-                tracing::debug!("SNI matched target host {}, {retry_count} peek costed.", sni.unwrap());
-                return Ok(true);
+                tracing::debug!(
+                    "SNI matched target host {}, {retry_count} peek costed.",
+                    sni.unwrap()
+                );
+                return Ok(PeekResult::Matched);
             } else if sni.is_some() {
                 tracing::debug!("SNI not matched: {}.", sni.unwrap());
-                return Ok(false);
+                return Ok(PeekResult::NotMatched);
             } else {
                 tracing::debug!("SNI not found. Peeking more.");
                 retry_count += 1;

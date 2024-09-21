@@ -61,6 +61,10 @@ pub struct Args {
     )]
     /// Target upstream to connect to when incoming TLS stream's SNI matches any of `target_host`s.
     pub target_upstream: Option<Upstream>,
+
+    #[arg(long)]
+    /// If set, only accept HTTPS connections.
+    pub https_only: bool,
 }
 
 impl Args {
@@ -111,6 +115,10 @@ impl Args {
             } else {
                 bail!("missing target upstream in both cmdline args and config file");
             }
+        }
+
+        if !args.https_only {
+            args.https_only = config_file.get_or_try_init(Self::from_file)?.https_only;
         }
 
         args.set_global();
@@ -173,6 +181,7 @@ impl Args {
                                 [127, 0, 0, 1],
                                 443,
                             )))),
+                            https_only: false,
                         },
                     );
                 }

@@ -1,11 +1,12 @@
 mod config;
+mod error;
 mod peek;
 mod relay;
 mod utils;
-mod error;
 
 use std::{
     io,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, OnceLock},
 };
 
@@ -13,6 +14,7 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use mimalloc::MiMalloc;
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -67,36 +69,55 @@ async fn create_server() -> Result<()> {
 
                 let conn_counter = conn_counter.clone();
                 tokio::spawn(async move {
+                    let span = tracing::debug_span!("conn_handler", remote_addr = ?incoming.peer_addr().unwrap_or_else(|e| {
+                            tracing::error!("Failed to get remote addr: {e:?}");
+                            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+                        })
+                    );
+
                     conn_counter.conn_established();
 
-                    let relay_conn = {
-                        let args = get_args!();
-                        let upstream = if peek::Peeker::is_target_host(&mut incoming)
-                            .await
-                            .inspect_err(|e| {
-                                tracing::error!("Error when peeking target host: {:?}", e);
-                            })
-                            .unwrap_or_default()
-                        {
-                            args.target_upstream.as_ref().unwrap()
-                        } else {
-                            args.default_upstream.as_ref().unwrap()
+                    async {
+                        let relay_conn = {
+                            let args = get_args!();
+
+                            let upstream = match peek::Peeker::is_target_host(&mut incoming).await {
+                                Ok(peek::PeekResult::Matched) => {
+                                    args.target_upstream.as_ref().unwrap()
+                                }
+                                Ok(peek::PeekResult::NotMatched) => {
+                                    args.default_upstream.as_ref().unwrap()
+                                }
+                                Ok(peek::PeekResult::NotHTTPS) => {
+                                    if args.https_only {
+                                        tracing::debug!(
+                                            "Not HTTPS, drop conn according to config."
+                                        );
+                                        return;
+                                    } else {
+                                        tracing::debug!("Not HTTPS, relay to default upstream.");
+                                        args.default_upstream.as_ref().unwrap()
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Error when peeking target host: {e:?}");
+                                    args.default_upstream.as_ref().unwrap()
+                                }
+                            };
+
+                            match relay::RelayConn::new(upstream).await {
+                                Ok(relay_conn) => relay_conn,
+                                Err(e) => {
+                                    tracing::error!("Failed to connect to upstream: {e:?}",);
+                                    return;
+                                }
+                            }
                         };
 
-                        match relay::RelayConn::new(upstream).await {
-                            Ok(relay_conn) => relay_conn,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to connect to upstream {:?}: {:?}",
-                                    upstream,
-                                    e
-                                );
-                                return;
-                            }
-                        }
-                    };
-
-                    let _ = relay_conn.relay_io(incoming).await;
+                        let _ = relay_conn.relay_io(incoming).await;
+                    }
+                    .instrument(span)
+                    .await
                 });
             }
         })

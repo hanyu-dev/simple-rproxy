@@ -4,5 +4,6 @@
   "target_host": [
     "example.com"
   ],
-  "target_upstream": "127.0.0.1:443"
+  "target_upstream": "127.0.0.1:443",
+  "https_only": false
 }
