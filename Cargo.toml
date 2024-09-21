@@ -34,8 +34,9 @@ mimalloc = "0.1"
 # Log deps
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
-    "parking_lot",
+    "chrono",
     "env-filter",
+    "parking_lot",
 ] }
 once_cell = { version = "1.19.0", features = ["parking_lot"] }
 

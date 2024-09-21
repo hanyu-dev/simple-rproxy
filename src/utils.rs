@@ -12,6 +12,7 @@ use tokio::{
     net::{TcpListener, TcpSocket},
     time::sleep,
 };
+use tracing_subscriber::fmt::time::ChronoLocal;
 
 use crate::get_args;
 
@@ -32,11 +33,13 @@ pub fn init_tracing() {
         filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
     };
 
-    let fmt_layer = tracing_subscriber::fmt::layer().with_filter(
-        EnvFilter::builder()
-            .with_default_directive(LevelFilter::DEBUG.into())
-            .from_env_lossy(),
-    );
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_timer(ChronoLocal::rfc_3339())
+        .with_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::DEBUG.into())
+                .from_env_lossy(),
+        );
     tracing_subscriber::registry().with(fmt_layer).init();
 }
 
