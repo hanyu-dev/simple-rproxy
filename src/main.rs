@@ -2,6 +2,7 @@ mod config;
 mod peek;
 mod relay;
 mod utils;
+mod error;
 
 use std::{
     io,

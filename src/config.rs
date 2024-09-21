@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     fs, io,
     net::SocketAddr,
+    process::exit,
     sync::{Arc, OnceLock},
 };
 
@@ -10,6 +11,8 @@ use arc_swap::ArcSwap;
 use clap::Parser;
 use once_cell::unsync::OnceCell;
 use serde::{Deserialize, Serialize};
+
+use crate::error::Error;
 
 /// Global config
 pub static ARGS: OnceLock<ArcSwap<Args>> = OnceLock::new();
@@ -174,9 +177,9 @@ impl Args {
                     );
                 }
 
-                bail!("Config file not found");
+                exit(0)
             }
-            Err(e) => Err(anyhow!("Failed to open config file.").context(e)),
+            Err(e) => Err(anyhow!(Error::Config("IO")).context(e)),
         }
     }
 }

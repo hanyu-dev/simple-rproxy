@@ -1,19 +1,28 @@
 //! Peek TLS Stream
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use tokio::net::TcpStream;
 
-use crate::config::TARGET_HOSTS;
+use crate::{config::TARGET_HOSTS, error::Error};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Peeker;
 
 impl Peeker {
     #[inline]
+    #[tracing::instrument(
+        level = "debug",
+        skip(stream),
+        fields(
+            remote_addr = ?stream.peer_addr()
+        ),
+        ret
+    )]
     /// Peek the stream (maybe tls stream) and see if it contains any of the target hosts.
     pub async fn is_target_host(stream: &mut TcpStream) -> Result<bool> {
         if Self::try_peek::<1>(stream).await[0] != 0x16 {
-            bail!("Not a HTTPS stream, passthrough tcp stream to upstream");
+            tracing::debug!("Not a TLS stream.");
+            return Ok(false);
         }
 
         let buf = Self::try_peek::<1024>(stream).await;
@@ -28,7 +37,7 @@ impl Peeker {
                 if let Some(bytes) = buf.get(cursor..cursor + $len) {
                     bytes
                 } else {
-                    bail!("Invalid TLS client hello");
+                    bail!(Error::ClientHello("codec error"));
                 }
             };
             ($len:expr, THEN: $prefix:ident => $then:block) => {
@@ -36,7 +45,7 @@ impl Peeker {
                     cursor += $len;
                     $then
                 } else {
-                    bail!("Invalid TLS client hello");
+                    bail!(Error::ClientHello("codec error"));
                 }
             };
             ($len:expr, ADD: $prefix:ident => $then:block) => {
@@ -45,7 +54,7 @@ impl Peeker {
                     cursor += content_len + $len;
                     content_len
                 } else {
-                    bail!("Invalid TLS client hello");
+                    bail!(Error::ClientHello("codec error"));
                 }
             };
         }
@@ -59,7 +68,7 @@ impl Peeker {
         get_bytes!(2, ADD: compression_methods_prefix => {
             if compression_methods_prefix != [0x01, 0x00] {
                 tracing::debug!(
-                    "Compression method is not null but {:?}, passthrough tcp stream to upstream",
+                    "Compression method is not null but {:?}",
                     &buf[cursor..cursor + 1]
                 );
                 return Ok(false);
@@ -80,7 +89,7 @@ impl Peeker {
                 2 => &Self::try_peek::<2048>(stream).await[..],
                 3 => &Self::try_peek::<3072>(stream).await[..],
                 4 => &Self::try_peek::<4096>(stream).await[..],
-                _ => bail!("TLS client hello is too long"),
+                _ => bail!(Error::ClientHello("too long")),
             };
 
             let sni = Self::find_server_name(&mut cursor, buf)?;
@@ -92,19 +101,13 @@ impl Peeker {
                     .load()
                     .contains(sni)
             }) {
-                tracing::debug!(
-                    "SNI matched: {:?} after {} peek. Upstream will be set to target one",
-                    sni,
-                    retry_count
-                );
+                tracing::debug!("SNI matched target host {}, {retry_count} peek costed.", sni.unwrap());
                 return Ok(true);
             } else if sni.is_some() {
-                tracing::debug!(
-                    "SNI not matched: {:?}. Upstream will be set to default one",
-                    sni
-                );
+                tracing::debug!("SNI not matched: {}.", sni.unwrap());
                 return Ok(false);
             } else {
+                tracing::debug!("SNI not found. Peeking more.");
                 retry_count += 1;
             }
         }
@@ -130,16 +133,25 @@ impl Peeker {
             *cursor += 4;
 
             if extension_prefix[0..2] == [0x00, 0x00] {
-                tracing::debug!("server_name found...");
+                tracing::debug!("Ext `server_name` found.");
 
-                let server_name = bytes
-                    .get(*cursor..*cursor + extension_length)
-                    .ok_or(anyhow!(
-                        "SNI extension length is not correct. Full peek: {:02x?}",
-                        bytes
-                    ))?
-                    .get(5..)
-                    .unwrap_or(&[]);
+                let server_name =
+                    bytes
+                        .get(*cursor..*cursor + extension_length)
+                        .ok_or_else(|| {
+                            tracing::error!("Peeked buf is not sufficient: {:02x?}", bytes);
+
+                            Error::ClientHello("failed to get SNI")
+                        })?;
+
+                let server_name = server_name.get(5..).unwrap_or_else(|| {
+                    if server_name.is_empty() {
+                        tracing::debug!("Empty SNI");
+                    } else {
+                        tracing::warn!("Invalid SNI: {:02x?}", server_name);
+                    }
+                    &[]
+                });
 
                 return Ok(Some(unsafe { std::str::from_utf8_unchecked(server_name) }));
             }
