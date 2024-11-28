@@ -149,6 +149,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "79296716171880943b8470b5f8d03aa55eb2e645a4874bdbb28adb49162e012c"
 
 [[package]]
+name = "bytes"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "325918d6fe32f23b19878fe4b34794ae41fc19ddbe53b10571a4874d44ffd39b"
+
+[[package]]
 name = "cc"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -479,17 +485,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "realm_io"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2558ac548920bb63a08d21496481b24818501cb1a7bbd7c1c3b6d9bc5d1e4a41"
-dependencies = [
- "libc",
- "socket2",
- "tokio",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -628,12 +623,12 @@ dependencies = [
  "mimalloc",
  "once_cell",
  "proxy-header",
- "realm_io",
  "serde",
  "serde_json",
  "socket2",
  "thiserror",
  "tokio",
+ "tokio-splice",
  "tracing",
  "tracing-subscriber",
 ]
@@ -708,6 +703,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22cfb5bee7a6a52939ca9224d6ac897bb669134078daa8735560897f69de4d33"
 dependencies = [
  "backtrace",
+ "bytes",
  "libc",
  "mio",
  "parking_lot",
@@ -727,6 +723,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tokio-splice"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a2a7f772e1e410eed5ec3aa665bc24532d01adb17d67aff6715db3f14e8c758"
+dependencies = [
+ "libc",
+ "tokio",
 ]
 
 [[package]]

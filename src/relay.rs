@@ -58,17 +58,16 @@ impl RelayConn {
         self
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     #[inline]
     /// Perform IO relay between the client and the destination.
     pub async fn relay_io(self, mut incoming: TcpStream) -> Result<()> {
-        let peer_addr = incoming.peer_addr()?;
-
-        macro_rules! realm_io {
+        macro_rules! do_relay_io {
             ($incoming:expr, $dest_stream:expr) => {{
                 if USE_PROXY_PROTOCOL.load(Ordering::Relaxed) {
                     let header = ProxyHeader::with_address(ProxiedAddress::stream(
-                        peer_addr,
-                        incoming.local_addr()?,
+                        $incoming.peer_addr()?,
+                        $incoming.local_addr()?,
                     ));
 
                     let mut buf = [0u8; 1024];
@@ -88,7 +87,7 @@ impl RelayConn {
                             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                             Err(e) => {
                                 return Err(anyhow!(
-                                    "Unknown error when try to write PROXY headers"
+                                    "Unknown error when try to write PROXY Protocol headers"
                                 )
                                 .context(e))
                             }
@@ -97,31 +96,36 @@ impl RelayConn {
                 };
 
                 #[cfg(unix)]
-                match realm_io::bidi_zero_copy($incoming, $dest_stream).await {
+                match tokio_splice::zero_copy_bidirectional(&mut $incoming, &mut $dest_stream).await
+                {
                     Ok((tx, rx)) => {
-                        tracing::debug!("Connection from {peer_addr} closed, tx: {tx} bytes, rx: {rx} bytes");
+                        tracing::debug!(
+                            "Zero-copy bidirectional io closed, tx: {tx} bytes, rx: {rx} bytes"
+                        );
 
                         return Ok(());
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::InvalidInput => {
-                        tracing::warn!("Failed to bidi_zero_copy data, fallback to bidi_copy");
+                        tracing::warn!("Fallback to copy bidirectional with buffer");
                     }
                     Err(e) => return Err(anyhow!("Failed to bidi_zero_copy data").context(e)),
                 }
 
-                realm_io::bidi_copy($incoming, $dest_stream)
+                tokio::io::copy_bidirectional(&mut $incoming, &mut $dest_stream)
                     .await
                     .map(|(tx, rx)| {
-                        tracing::debug!("Connection from {peer_addr} closed, tx: {tx} bytes, rx: {rx} bytes");
+                        tracing::debug!(
+                            "Zero-copy bidirectional io closed, tx: {tx} bytes, rx: {rx} bytes"
+                        );
                     })
-                    .map_err(|e| anyhow!("Failed to bidi_copy data").context(e))
+                    .map_err(Into::into)
             }};
         }
 
         match self {
-            Self::Tcp(mut dest_stream) => realm_io!(&mut incoming, &mut dest_stream),
+            Self::Tcp(mut dest_stream) => do_relay_io!(incoming, dest_stream),
             #[cfg(unix)]
-            Self::Unix(mut dest_stream) => realm_io!(&mut incoming, &mut dest_stream),
+            Self::Unix(mut dest_stream) => do_relay_io!(incoming, dest_stream),
         }
     }
 }

@@ -114,9 +114,7 @@ async fn create_server() -> Result<()> {
                             }
                         };
 
-                        if let Err(e) = relay_conn.relay_io(incoming).await {
-                            tracing::error!("Error when relaying: {e:?}");
-                        }
+                        let _ = relay_conn.relay_io(incoming).await;
                     }
                     .instrument(span)
                     .await
