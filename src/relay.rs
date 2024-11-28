@@ -2,7 +2,7 @@
 
 use std::{io, net::SocketAddr, path::Path, sync::atomic::Ordering};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use proxy_header::{ProxiedAddress, ProxyHeader};
 use tokio::net::TcpStream;
 #[cfg(unix)]
@@ -58,7 +58,7 @@ impl RelayConn {
         self
     }
 
-    #[tracing::instrument(level = "debug", skip_all, err)]
+    #[tracing::instrument(level = "debug", skip_all, err(Debug))]
     #[inline]
     /// Perform IO relay between the client and the destination.
     pub async fn relay_io(self, mut incoming: TcpStream) -> Result<()> {
@@ -74,10 +74,13 @@ impl RelayConn {
 
                     let len = header
                         .encode_to_slice_v2(&mut buf)
-                        .map_err(io::Error::other)?;
+                        .context("Failed to encode PROXY Protocol headers")?;
 
                     loop {
-                        $dest_stream.writable().await?;
+                        $dest_stream
+                            .writable()
+                            .await
+                            .context("Failed to write PROXY Protocol headers: not writable")?;
 
                         match $dest_stream.try_write(&buf[0..len]) {
                             Ok(writed_len) => {
@@ -86,10 +89,9 @@ impl RelayConn {
                             }
                             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                             Err(e) => {
-                                return Err(anyhow!(
-                                    "Unknown error when try to write PROXY Protocol headers"
-                                )
-                                .context(e))
+                                return Err(anyhow!(e).context(
+                                    "Failed to write PROXY Protocol headers: unknown error",
+                                ))
                             }
                         }
                     }
@@ -108,17 +110,19 @@ impl RelayConn {
                     Err(ref e) if e.kind() == io::ErrorKind::InvalidInput => {
                         tracing::warn!("Fallback to copy bidirectional with buffer");
                     }
-                    Err(e) => return Err(anyhow!("Failed to bidi_zero_copy data").context(e)),
+                    Err(e) => {
+                        return Err(anyhow!(e).context("`zero_copy_bidirectional` data failed"))
+                    }
                 }
 
                 tokio::io::copy_bidirectional(&mut $incoming, &mut $dest_stream)
                     .await
                     .map(|(tx, rx)| {
                         tracing::debug!(
-                            "Zero-copy bidirectional io closed, tx: {tx} bytes, rx: {rx} bytes"
+                            "Bidirectional io with buffer closed, tx: {tx} bytes, rx: {rx} bytes"
                         );
                     })
-                    .map_err(Into::into)
+                    .context("`copy_bidirectional` data failed")
             }};
         }
 

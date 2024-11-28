@@ -213,7 +213,7 @@ impl Args {
 
                 exit(0)
             }
-            Err(e) => Err(anyhow!(Error::Config("IO")).context(e)),
+            Err(e) => Err(anyhow!(e).context(Error::Config("IO"))),
         }
     }
 }
