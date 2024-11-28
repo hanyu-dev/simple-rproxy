@@ -28,11 +28,14 @@ fn gen_server_version() -> Result<()> {
     } else {
         "RELEASE"
     };
-    let version = format!("{}-{}-{}-{}", main_version, branch, commit, release_mode).replace('\n', "");
-    File::create(Path::new(&env::var("OUT_DIR")?).join("VERSION"))?.write_all(version.trim().as_bytes())?;
+    let version =
+        format!("{}-{}-{}-{}", main_version, branch, commit, release_mode).replace('\n', "");
+    File::create(Path::new(&env::var("OUT_DIR")?).join("VERSION"))?
+        .write_all(version.trim().as_bytes())?;
 
     let now = chrono::Local::now().to_rfc3339();
-    File::create(Path::new(&env::var("OUT_DIR")?).join("BUILD_TIME"))?.write_all(now.trim().as_bytes())?;
+    File::create(Path::new(&env::var("OUT_DIR")?).join("BUILD_TIME"))?
+        .write_all(now.trim().as_bytes())?;
 
     Ok(())
 }

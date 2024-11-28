@@ -69,7 +69,8 @@ pub fn create_listener() -> io::Result<TcpListener> {
 /// - [socket2::SockRef::set_cloexec](socket2::SockRef::set_cloexec): true
 /// - [socket2::SockRef::set_tcp_keepalive](socket2::SockRef::set_tcp_keepalive): 15s interval and 15s timeout
 /// - [socket2::SockRef::set_nodelay](socket2::SockRef::set_nodelay): true
-/// - [socket2::SockRef::set_nonblocking](socket2::SockRef::set_nonblocking): true
+/// - [socket2::SockRef::set_nonblocking](socket2::SockRef::set_nonblocking):
+///   true
 macro_rules! apply_socket_conf {
     ($socket:expr) => {{
         let sock_ref = socket2::SockRef::from($socket);
@@ -104,7 +105,8 @@ impl ConnCounter {
     }
 
     #[inline]
-    /// Wait for all connections to be closed or force exit after the given duration.
+    /// Wait for all connections to be closed or force exit after the given
+    /// duration.
     ///
     /// Default to wait for 15 sec
     pub async fn wait_conn_end(&self, force: Option<Duration>) {

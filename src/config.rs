@@ -3,7 +3,10 @@ use std::{
     fs, io,
     net::SocketAddr,
     process::exit,
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock,
+    },
 };
 
 use anyhow::{anyhow, bail, Result};
@@ -16,6 +19,8 @@ use crate::error::Error;
 
 /// Global config
 pub static ARGS: OnceLock<ArcSwap<Args>> = OnceLock::new();
+/// Global proxy protocol flag
+pub static USE_PROXY_PROTOCOL: AtomicBool = AtomicBool::new(false);
 /// Global target hosts set
 pub static TARGET_HOSTS: OnceLock<ArcSwap<HashSet<String, ahash::RandomState>>> = OnceLock::new();
 
@@ -44,14 +49,17 @@ pub struct Args {
     )]
     /// Default upstream like `nginx` to connect to.
     ///
-    /// Notice: Unix socket path is only available on Unix platforms and must be prefixed with `unix:`.
+    /// Notice: Unix socket path is only available on Unix platforms and must be
+    /// prefixed with `unix:`.
     ///
-    /// Example: `--default-upstream unix:/path/to/unix.sock` or `--upstream 0.0.0.0:443"
+    /// Example: `--default-upstream unix:/path/to/unix.sock` or `--upstream
+    /// 0.0.0.0:443"
     pub default_upstream: Option<Upstream>,
 
     #[arg(long, value_delimiter = ',')]
-    /// If any of `target_host`s is detected in incoming TLS stream SNI, the underlying
-    /// connection will be forwarded to the corresponding `target_upstream`.
+    /// If any of `target_host`s is detected in incoming TLS stream SNI, the
+    /// underlying connection will be forwarded to the corresponding
+    /// `target_upstream`.
     target_host: Vec<String>,
 
     #[arg(long, value_parser = Upstream::parse)]
@@ -59,12 +67,19 @@ pub struct Args {
         serialize_with = "Upstream::as_str",
         deserialize_with = "Upstream::from_str"
     )]
-    /// Target upstream to connect to when incoming TLS stream's SNI matches any of `target_host`s.
+    /// Target upstream to connect to when incoming TLS stream's SNI matches any
+    /// of `target_host`s.
     pub target_upstream: Option<Upstream>,
 
     #[arg(long)]
     /// If set, only accept HTTPS connections.
     pub https_only: bool,
+
+    #[arg(long, default_value_t = false)]
+    /// If set, will connect upstream with PROXY protocol.
+    ///
+    /// Currently only support PROXY protocol v2.
+    proxy_protocol: bool,
 }
 
 impl Args {
@@ -121,6 +136,10 @@ impl Args {
             args.https_only = config_file.get_or_try_init(Self::from_file)?.https_only;
         }
 
+        if !args.proxy_protocol {
+            args.proxy_protocol = config_file.get_or_try_init(Self::from_file)?.proxy_protocol;
+        }
+
         args.set_global();
 
         Ok(())
@@ -147,6 +166,8 @@ impl Args {
             TARGET_HOSTS.get().unwrap().store(target_host.into_inner());
         }
 
+        USE_PROXY_PROTOCOL.store(self.proxy_protocol, Ordering::Relaxed);
+
         if let Err(args) = ARGS.set(ArcSwap::from(Arc::new(self))) {
             ARGS.get().unwrap().store(args.into_inner());
         }
@@ -160,7 +181,10 @@ impl Args {
         {
             Ok(config_file) => serde_json::from_reader(config_file).map_err(Into::into),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                tracing::info!("Config file not found, generate example config and exit. DO RENAME to `config.json` after editted.");
+                tracing::info!(
+                    "Config file not found, generate example config and exit. DO RENAME to \
+                     `config.json` after editted."
+                );
 
                 if let Ok(f) = fs::OpenOptions::new()
                     .write(true)
@@ -182,6 +206,7 @@ impl Args {
                                 443,
                             )))),
                             https_only: false,
+                            proxy_protocol: false,
                         },
                     );
                 }

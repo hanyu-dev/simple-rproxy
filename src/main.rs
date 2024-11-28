@@ -114,7 +114,9 @@ async fn create_server() -> Result<()> {
                             }
                         };
 
-                        let _ = relay_conn.relay_io(incoming).await;
+                        if let Err(e) = relay_conn.relay_io(incoming).await {
+                            tracing::error!("Error when relaying: {e:?}");
+                        }
                     }
                     .instrument(span)
                     .await
@@ -163,7 +165,8 @@ async fn reload_handle() {
     });
 }
 
-/// `shutdown_signal` will inform axum to gracefully shutdown when the process is asked to shutdown.
+/// `shutdown_signal` will inform axum to gracefully shutdown when the process
+/// is asked to shutdown.
 async fn termination_handle() {
     use tokio::signal;
 

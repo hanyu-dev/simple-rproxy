@@ -464,6 +464,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxy-header"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1493f63ddddfba840c3169e997c2905d09538ace72d64e84af6324c6e0e065"
+
+[[package]]
 name = "quote"
 version = "1.0.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -621,6 +627,7 @@ dependencies = [
  "clap",
  "mimalloc",
  "once_cell",
+ "proxy-header",
  "realm_io",
  "serde",
  "serde_json",

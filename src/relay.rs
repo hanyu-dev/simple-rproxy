@@ -1,12 +1,17 @@
 //! Bridge between the client and upstream
 
-use std::{io, net::SocketAddr, path::Path};
+use std::{io, net::SocketAddr, path::Path, sync::atomic::Ordering};
 
+use anyhow::{anyhow, Result};
+use proxy_header::{ProxiedAddress, ProxyHeader};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 
-use crate::{apply_socket_conf, config::Upstream};
+use crate::{
+    apply_socket_conf,
+    config::{Upstream, USE_PROXY_PROTOCOL},
+};
 
 /// Connected to a destination.
 pub enum RelayConn {
@@ -55,9 +60,40 @@ impl RelayConn {
 
     #[inline]
     /// Perform IO relay between the client and the destination.
-    pub async fn relay_io(self, mut incoming: TcpStream) -> io::Result<()> {
+    pub async fn relay_io(self, mut incoming: TcpStream) -> Result<()> {
         macro_rules! realm_io {
             ($incoming:expr, $dest_stream:expr) => {{
+                if USE_PROXY_PROTOCOL.load(Ordering::Relaxed) {
+                    let header = ProxyHeader::with_address(ProxiedAddress::stream(
+                        incoming.peer_addr()?,
+                        incoming.local_addr()?,
+                    ));
+
+                    let mut buf = [0u8; 1024];
+
+                    let len = header
+                        .encode_to_slice_v2(&mut buf)
+                        .map_err(io::Error::other)?;
+
+                    loop {
+                        $dest_stream.writable().await?;
+
+                        match $dest_stream.try_write(&buf[0..len]) {
+                            Ok(writed_len) => {
+                                debug_assert_eq!(writed_len, len);
+                                break;
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                            Err(e) => {
+                                return Err(anyhow!(
+                                    "Unknown error when try to write PROXY headers"
+                                )
+                                .context(e))
+                            }
+                        }
+                    }
+                };
+
                 #[cfg(target_os = "linux")]
                 match realm_io::bidi_zero_copy($incoming, $dest_stream).await {
                     Ok(_) => Ok(()),
@@ -72,6 +108,7 @@ impl RelayConn {
                 realm_io::bidi_copy($incoming, $dest_stream)
                     .await
                     .map(|_| ())
+                    .map_err(|e| anyhow!("Failed to bidi_copy data").context(e))
             }};
         }
 

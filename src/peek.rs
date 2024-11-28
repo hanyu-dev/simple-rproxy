@@ -23,7 +23,8 @@ pub struct Peeker;
 
 impl Peeker {
     #[inline]
-    /// Peek the stream (maybe tls stream) and see if it contains any of the target hosts.
+    /// Peek the stream (maybe tls stream) and see if it contains any of the
+    /// target hosts.
     pub async fn is_target_host(stream: &mut TcpStream) -> Result<PeekResult> {
         if Self::try_peek::<1>(stream).await[0] != 0x16 {
             return Ok(PeekResult::NotHTTPS);
