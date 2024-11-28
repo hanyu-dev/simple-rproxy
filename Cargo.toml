@@ -52,3 +52,7 @@ codegen-units = 1
 incremental = false
 panic = "unwind"
 strip = true
+
+# cargo-multivers
+[package.metadata.multivers.x86_64]
+cpus = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"]
