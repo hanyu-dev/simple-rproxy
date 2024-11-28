@@ -61,11 +61,13 @@ impl RelayConn {
     #[inline]
     /// Perform IO relay between the client and the destination.
     pub async fn relay_io(self, mut incoming: TcpStream) -> Result<()> {
+        let peer_addr = incoming.peer_addr()?;
+
         macro_rules! realm_io {
             ($incoming:expr, $dest_stream:expr) => {{
                 if USE_PROXY_PROTOCOL.load(Ordering::Relaxed) {
                     let header = ProxyHeader::with_address(ProxiedAddress::stream(
-                        incoming.peer_addr()?,
+                        peer_addr,
                         incoming.local_addr()?,
                     ));
 
@@ -94,20 +96,24 @@ impl RelayConn {
                     }
                 };
 
-                #[cfg(target_os = "linux")]
+                #[cfg(unix)]
                 match realm_io::bidi_zero_copy($incoming, $dest_stream).await {
-                    Ok(_) => Ok(()),
-                    Err(ref e) if e.kind() == io::ErrorKind::InvalidInput => {
-                        realm_io::bidi_copy($incoming, $dest_stream)
-                            .await
-                            .map(|_| ())
+                    Ok((tx, rx)) => {
+                        tracing::debug!("Connection from {peer_addr} closed, tx: {tx} bytes, rx: {rx} bytes");
+
+                        return Ok(());
                     }
-                    Err(e) => Err(e),
+                    Err(ref e) if e.kind() == io::ErrorKind::InvalidInput => {
+                        tracing::warn!("Failed to bidi_zero_copy data, fallback to bidi_copy");
+                    }
+                    Err(e) => return Err(anyhow!("Failed to bidi_zero_copy data").context(e)),
                 }
-                #[cfg(not(target_os = "linux"))]
+
                 realm_io::bidi_copy($incoming, $dest_stream)
                     .await
-                    .map(|_| ())
+                    .map(|(tx, rx)| {
+                        tracing::debug!("Connection from {peer_addr} closed, tx: {tx} bytes, rx: {rx} bytes");
+                    })
                     .map_err(|e| anyhow!("Failed to bidi_copy data").context(e))
             }};
         }
