@@ -234,7 +234,7 @@ impl Cli {
             #[cfg(unix)]
             (
                 "unix-path.example.com".into(),
-                Upstream::Unix("unix:/run/nginx/example.sock".to_string()).into(),
+                Upstream::Unix("/run/nginx/example.sock".to_string()).into(),
             ),
         ]
         .into_iter()

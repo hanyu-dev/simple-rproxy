@@ -2,7 +2,7 @@
   "listen": "0.0.0.0:443",
   "default_upstream": "127.0.0.1:8443",
   "upstream": {
-    "unix-path.example.org": "unix:unix:/run/nginx/example.sock",
+    "unix-path.example.com": "unix:/run/nginx/example.sock",
     "example.com": "127.0.0.1:8443"
   },
   "https_only": true,
