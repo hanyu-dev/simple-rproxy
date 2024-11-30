@@ -17,18 +17,18 @@ use tracing_subscriber::fmt::time::ChronoLocal;
 use crate::get_args;
 
 /// The version of the server.
-pub const VERSION: &str = concat!("v", include_str!(concat!(env!("OUT_DIR"), "/VERSION")));
+pub(crate) const VERSION: &str = concat!("v", include_str!(concat!(env!("OUT_DIR"), "/VERSION")));
 /// The version of the server.
-pub const BUILD_TIME: &str = include_str!(concat!(env!("OUT_DIR"), "/BUILD_TIME"));
+pub(crate) const BUILD_TIME: &str = include_str!(concat!(env!("OUT_DIR"), "/BUILD_TIME"));
 
-pub static KEEP_ALIVE_CONF: LazyLock<socket2::TcpKeepalive> = LazyLock::new(|| {
+pub(crate) static KEEP_ALIVE_CONF: LazyLock<socket2::TcpKeepalive> = LazyLock::new(|| {
     socket2::TcpKeepalive::new()
         .with_time(Duration::from_secs(15))
         .with_interval(Duration::from_secs(15))
 });
 
 /// Initialize tracing subscriber.
-pub fn init_tracing() {
+pub(crate) fn init_tracing() {
     use tracing_subscriber::{
         filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
     };
@@ -44,7 +44,7 @@ pub fn init_tracing() {
 }
 
 /// Create a listener with the given address.
-pub fn create_listener() -> io::Result<TcpListener> {
+pub(crate) fn create_listener() -> io::Result<TcpListener> {
     let addr = {
         let args = get_args!();
         args.listen.unwrap()
@@ -85,14 +85,14 @@ macro_rules! apply_socket_conf {
 
 #[derive(Debug, Clone)]
 /// Conn counter
-pub struct ConnCounter {
+pub(crate) struct ConnCounter {
     inner: Arc<AtomicUsize>,
 }
 
 impl ConnCounter {
     #[inline]
-    /// Create a new [ConnCounter].
-    pub fn new() -> Self {
+    /// Create a new [`ConnCounter`].
+    pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(AtomicUsize::new(0)),
         }
@@ -100,7 +100,7 @@ impl ConnCounter {
 
     #[inline]
     /// Increment the connection counter.
-    pub fn conn_established(&self) {
+    pub(crate) fn conn_established(&self) {
         self.inner.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -109,7 +109,7 @@ impl ConnCounter {
     /// duration.
     ///
     /// Default to wait for 15 sec
-    pub async fn wait_conn_end(&self, force: Option<Duration>) {
+    pub(crate) async fn wait_conn_end(&self, force: Option<Duration>) {
         tokio::select! {
             biased;
             _ = async {

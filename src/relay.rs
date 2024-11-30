@@ -14,22 +14,21 @@ use crate::{
 };
 
 /// Connected to a destination.
-pub enum RelayConn {
-    /// [TcpStream]
+pub(crate) enum RelayConn {
+    /// [`TcpStream`]
     Tcp(TcpStream),
 
     #[cfg(unix)]
-    /// [UnixStream](tokio::net::UnixStream)
+    /// [`UnixStream`](tokio::net::UnixStream)
     Unix(UnixStream),
 }
 
 impl RelayConn {
-    #[allow(private_bounds)]
     #[inline]
     /// Connect to the destination.
     ///
-    /// Will apply some socket configurations. See [apply_socket_conf].
-    pub async fn new<'c, C>(dest: C) -> io::Result<Self>
+    /// Will apply some socket configurations. See [`apply_socket_conf`].
+    pub(crate) async fn new<'c, C>(dest: C) -> io::Result<Self>
     where
         C: Into<ConnTo<&'c str>>,
     {
@@ -134,11 +133,11 @@ impl RelayConn {
     }
 }
 
-enum ConnTo<P: AsRef<Path> = &'static str> {
+pub(crate) enum ConnTo<P: AsRef<Path> = &'static str> {
     /// Connect to a socket address.
     SocketAddr(SocketAddr),
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "Unix socket is not supported on this platform")]
     /// Connect to a Unix socket path.
     UnixPath(P),
 }

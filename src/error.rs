@@ -2,7 +2,7 @@
 
 #[derive(Debug, Clone, thiserror::Error)]
 /// Error types
-pub enum Error {
+pub(crate) enum Error {
     #[error("Invalid TLS client hello: {0}")]
     ClientHello(&'static str),
 

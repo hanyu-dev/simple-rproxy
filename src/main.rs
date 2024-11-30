@@ -1,3 +1,5 @@
+//! Simple-RProxy
+
 mod config;
 mod error;
 mod peek;
@@ -40,7 +42,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// [JoinHandle] after spawning the server.
+/// [`JoinHandle`] after spawning the server.
 static SERVER_HANDLE: OnceLock<ArcSwap<(JoinHandle<()>, utils::ConnCounter)>> = OnceLock::new();
 
 #[inline]

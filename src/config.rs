@@ -18,11 +18,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 
 /// Global config
-pub static ARGS: OnceLock<ArcSwap<Args>> = OnceLock::new();
+pub(crate) static ARGS: OnceLock<ArcSwap<Args>> = OnceLock::new();
 /// Global proxy protocol flag
-pub static USE_PROXY_PROTOCOL: AtomicBool = AtomicBool::new(false);
+pub(crate) static USE_PROXY_PROTOCOL: AtomicBool = AtomicBool::new(false);
 /// Global target hosts set
-pub static TARGET_HOSTS: OnceLock<ArcSwap<HashSet<String, ahash::RandomState>>> = OnceLock::new();
+pub(crate) static TARGET_HOSTS: OnceLock<ArcSwap<HashSet<String, ahash::RandomState>>> =
+    OnceLock::new();
 
 #[macro_export]
 /// Get the global [Args] instance and get $name.
@@ -37,7 +38,7 @@ macro_rules! get_args {
 
 #[derive(Debug, clap::Parser, Serialize, Deserialize)]
 #[command(version, about, long_about = None)]
-pub struct Args {
+pub(crate) struct Args {
     #[arg(short, long)]
     /// Local socket addr to bind to, default to be 0.0.0.0:443
     pub listen: Option<SocketAddr>,
@@ -53,7 +54,7 @@ pub struct Args {
     /// prefixed with `unix:`.
     ///
     /// Example: `--default-upstream unix:/path/to/unix.sock` or `--upstream
-    /// 0.0.0.0:443"
+    /// 0.0.0.0:443`
     pub default_upstream: Option<Upstream>,
 
     #[arg(long, value_delimiter = ',')]
@@ -83,7 +84,7 @@ pub struct Args {
 }
 
 impl Args {
-    pub fn try_init() -> Result<()> {
+    pub(crate) fn try_init() -> Result<()> {
         let mut args = Self::parse();
 
         let config_file = OnceCell::new();
@@ -114,7 +115,7 @@ impl Args {
         if args.target_host.is_empty() {
             let target_host = &config_file.get_or_try_init(Self::from_file)?.target_host;
             if !target_host.is_empty() {
-                args.target_host = target_host.clone();
+                args.target_host.clone_from(target_host);
             } else {
                 bail!("missing target host in both cmdline args and config file");
             }
@@ -145,11 +146,10 @@ impl Args {
         Ok(())
     }
 
-    #[allow(unused)]
     /// Reload config from file.
     ///
     /// If listen addr is changed, return true.
-    pub fn reload_config() -> Result<bool> {
+    pub(crate) fn reload_config() -> Result<bool> {
         let listen = get_args!().listen;
 
         Self::from_file()?.set_global();
@@ -220,7 +220,7 @@ impl Args {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Upstream to connect to.
-pub enum Upstream {
+pub(crate) enum Upstream {
     /// Upstream addr to connect to.
     SocketAddr(SocketAddr),
 
@@ -232,7 +232,7 @@ pub enum Upstream {
 impl Upstream {
     /// Parse string to [Upstream], for [clap].
     fn parse(s: &str) -> Result<Self> {
-        #[allow(unused_variables)]
+        #[allow(unused_variables, reason = "cfg")]
         if let Some(unix_path) = s.strip_prefix("unix:") {
             #[cfg(unix)]
             return Ok(Upstream::Unix(unix_path.to_string()));
@@ -260,7 +260,7 @@ impl Upstream {
 
         let string = string.unwrap();
 
-        #[allow(unused_variables)]
+        #[allow(unused_variables, reason = "cfg")]
         if let Some(unix_path) = string.strip_prefix("unix:") {
             #[cfg(unix)]
             return Ok(Some(Upstream::Unix(unix_path.to_string())));

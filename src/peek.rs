@@ -7,7 +7,7 @@ use crate::{config::TARGET_HOSTS, error::Error};
 
 #[derive(Debug, Clone, Copy)]
 /// Peek result
-pub enum PeekResult {
+pub(crate) enum PeekResult {
     /// The stream is not a HTTPS stream.
     NotHTTPS,
 
@@ -19,13 +19,13 @@ pub enum PeekResult {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct Peeker;
+pub(crate) struct Peeker;
 
 impl Peeker {
     #[inline]
     /// Peek the stream (maybe tls stream) and see if it contains any of the
     /// target hosts.
-    pub async fn is_target_host(stream: &mut TcpStream) -> Result<PeekResult> {
+    pub(crate) async fn is_target_host(stream: &mut TcpStream) -> Result<PeekResult> {
         if Self::try_peek::<1>(stream).await[0] != 0x16 {
             return Ok(PeekResult::NotHTTPS);
         }
@@ -161,6 +161,7 @@ impl Peeker {
                     &[]
                 });
 
+                #[allow(unsafe_code, reason = "Non-UTF-8 SNI is OK")]
                 return Ok(Some(unsafe { std::str::from_utf8_unchecked(server_name) }));
             }
 
