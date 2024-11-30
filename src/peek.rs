@@ -2,7 +2,7 @@
 
 use std::ops;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::net::TcpStream;
 
 use crate::error::Error;
@@ -54,14 +54,14 @@ impl<'tcp> PeekedTcpStream<'tcp> {
         cursor += 1 + buf[cursor] as usize;
 
         macro_rules! get_bytes {
-            ($len:expr) => {
+            ($len:expr_2021) => {
                 if let Some(bytes) = buf.get(cursor..cursor + $len) {
                     bytes
                 } else {
                     bail!(Error::ClientHello("codec error"));
                 }
             };
-            ($len:expr, THEN: $prefix:ident => $then:block) => {
+            ($len:expr_2021, THEN: $prefix:ident => $then:block) => {
                 if let Some($prefix) = buf.get(cursor..cursor + $len) {
                     cursor += $len;
                     $then
@@ -69,7 +69,7 @@ impl<'tcp> PeekedTcpStream<'tcp> {
                     bail!(Error::ClientHello("codec error"));
                 }
             };
-            ($len:expr, ADD: $prefix:ident => $then:block) => {
+            ($len:expr_2021, ADD: $prefix:ident => $then:block) => {
                 if let Some($prefix) = buf.get(cursor..cursor + $len) {
                     let content_len = $then;
                     cursor += content_len + $len;

@@ -12,7 +12,7 @@ mod utils;
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{atomic::Ordering, Mutex},
+    sync::{Mutex, atomic::Ordering},
 };
 
 use anyhow::Result;
@@ -124,20 +124,23 @@ async fn create_server() -> Result<()> {
                                 Some(sni_name) => {
                                     tracing::debug!("SNI found: {sni_name}");
 
-                                    if let Some(upstream) = config::TARGET_UPSTREAMS.get(sni_name) {
-                                        tracing::debug!(
-                                            "Upstream [{}] matched for [{sni_name}]",
-                                            upstream.value()
-                                        );
+                                    match config::TARGET_UPSTREAMS.get(sni_name) {
+                                        Some(upstream) => {
+                                            tracing::debug!(
+                                                "Upstream [{}] matched for [{sni_name}]",
+                                                upstream.value()
+                                            );
 
-                                        upstream.connect().await
-                                    } else {
-                                        config::DEFAULT_UPSTREAM
-                                            .load()
-                                            .as_ref()
-                                            .unwrap()
-                                            .connect()
-                                            .await
+                                            upstream.connect().await
+                                        }
+                                        _ => {
+                                            config::DEFAULT_UPSTREAM
+                                                .load()
+                                                .as_ref()
+                                                .unwrap()
+                                                .connect()
+                                                .await
+                                        }
                                     }
                                 }
                                 None => {

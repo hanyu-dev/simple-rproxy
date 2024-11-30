@@ -3,8 +3,8 @@ use std::{
     net::SocketAddr,
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -155,41 +155,44 @@ impl Cli {
             }
         }
 
-        if let Some(config) = Self::load_config_file()? {
-            tracing::info!("Config loaded from file...");
+        match Self::load_config_file()? {
+            Some(config) => {
+                tracing::info!("Config loaded from file...");
 
-            config.apply_global_config();
-        } else {
-            let Cli {
-                listen,
-                default_upstream,
-                upstream,
-                https_only,
-                proxy_protocol,
-                subcommand: _,
-            } = args;
-
-            let listen = listen.unwrap_or_else(|| {
-                tracing::warn!("No listen addr specified, use default: 0.0.0.0:443");
-                SocketAddr::from(([0, 0, 0, 0], 443))
-            });
-
-            let upstream = upstream.unwrap_or_default();
-
-            let default_upstream = upstream
-                .get("default")
-                .map(|kv| Arc::clone(kv.value()))
-                .or(default_upstream)
-                .context("No default upstream set, see `--help` for more details")?;
-
-            Config {
-                listen,
-                default_upstream,
-                upstream,
-                https_only,
-                proxy_protocol,
+                config.apply_global_config();
             }
-            .apply_global_config();
+            _ => {
+                let Cli {
+                    listen,
+                    default_upstream,
+                    upstream,
+                    https_only,
+                    proxy_protocol,
+                    subcommand: _,
+                } = args;
+
+                let listen = listen.unwrap_or_else(|| {
+                    tracing::warn!("No listen addr specified, use default: 0.0.0.0:443");
+                    SocketAddr::from(([0, 0, 0, 0], 443))
+                });
+
+                let upstream = upstream.unwrap_or_default();
+
+                let default_upstream = upstream
+                    .get("default")
+                    .map(|kv| Arc::clone(kv.value()))
+                    .or(default_upstream)
+                    .context("No default upstream set, see `--help` for more details")?;
+
+                Config {
+                    listen,
+                    default_upstream,
+                    upstream,
+                    https_only,
+                    proxy_protocol,
+                }
+                .apply_global_config();
+            }
         }
 
         Ok(true)

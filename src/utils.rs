@@ -2,8 +2,8 @@ use std::{
     fmt, io,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, LazyLock,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -33,7 +33,7 @@ pub(crate) static KEEP_ALIVE_CONF: LazyLock<socket2::TcpKeepalive> = LazyLock::n
 /// Initialize tracing subscriber.
 pub(crate) fn init_tracing() {
     use tracing_subscriber::{
-        filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
+        EnvFilter, Layer, filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt,
     };
 
     let fmt_layer = tracing_subscriber::fmt::layer()
@@ -76,7 +76,7 @@ pub(crate) fn create_listener() -> io::Result<TcpListener> {
 /// - [socket2::SockRef::set_nonblocking](socket2::SockRef::set_nonblocking):
 ///   true
 macro_rules! apply_socket_conf {
-    ($socket:expr) => {{
+    ($socket:expr_2021) => {{
         let sock_ref = socket2::SockRef::from($socket);
 
         #[cfg(unix)]

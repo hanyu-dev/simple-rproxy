@@ -2,7 +2,7 @@
 
 use std::{io, sync::atomic::Ordering};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
@@ -42,7 +42,7 @@ impl RelayConn {
     /// Perform IO relay between the client and the destination.
     pub async fn relay_io(self, mut incoming: TcpStream) -> Result<()> {
         macro_rules! do_relay_io {
-            ($incoming:expr, $dest_stream:expr) => {{
+            ($incoming:expr_2021, $dest_stream:expr_2021) => {{
                 if USE_PROXY_PROTOCOL.load(Ordering::Relaxed) {
                     let (len, buf) =
                         encode_proxy_header_v2($incoming.peer_addr()?, $incoming.local_addr()?)
@@ -81,7 +81,7 @@ impl RelayConn {
                             tracing::warn!("Fallback to copy bidirectional with buffer");
                         }
                         _ => {
-                            return Err(anyhow!(e).context("`zero_copy_bidirectional` data failed"))
+                            return Err(anyhow!(e).context("`zero_copy_bidirectional` data failed"));
                         }
                     },
                 }
