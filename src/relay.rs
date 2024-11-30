@@ -106,12 +106,19 @@ impl RelayConn {
 
                         return Ok(());
                     }
-                    Err(ref e) if e.kind() == io::ErrorKind::InvalidInput => {
-                        tracing::warn!("Fallback to copy bidirectional with buffer");
-                    }
-                    Err(e) => {
-                        return Err(anyhow!(e).context("`zero_copy_bidirectional` data failed"))
-                    }
+                    Err(e) => match e.kind() {
+                        io::ErrorKind::BrokenPipe => {
+                            tracing::debug!("Connection closed unexpectedly");
+
+                            return Ok(());
+                        }
+                        io::ErrorKind::InvalidInput => {
+                            tracing::warn!("Fallback to copy bidirectional with buffer");
+                        }
+                        _ => {
+                            return Err(anyhow!(e).context("`zero_copy_bidirectional` data failed"))
+                        }
+                    },
                 }
 
                 tokio::io::copy_bidirectional(&mut $incoming, &mut $dest_stream)
