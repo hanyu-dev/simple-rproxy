@@ -1,6 +1,6 @@
 //! Bridge between the client and upstream
 
-use std::{io, net::SocketAddr, path::Path, sync::atomic::Ordering};
+use std::{io, sync::atomic::Ordering};
 
 use anyhow::{anyhow, Context, Result};
 #[cfg(unix)]
@@ -8,9 +8,7 @@ use tokio::net::UnixStream;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
-    apply_socket_conf,
-    config::{Upstream, USE_PROXY_PROTOCOL},
-    proxy_protocol::encode_proxy_header_v2,
+    apply_socket_conf, config::USE_PROXY_PROTOCOL, proxy_protocol::encode_proxy_header_v2,
 };
 
 /// Connected to a destination.
@@ -25,25 +23,7 @@ pub(crate) enum RelayConn {
 
 impl RelayConn {
     #[inline]
-    /// Connect to the destination.
-    ///
-    /// Will apply some socket configurations. See [`apply_socket_conf`].
-    pub(crate) async fn new<'c, C>(dest: C) -> io::Result<Self>
-    where
-        C: Into<ConnTo<&'c str>>,
-    {
-        match dest.into() {
-            ConnTo::SocketAddr(dest) => TcpStream::connect(dest).await.map(Self::Tcp),
-            #[cfg(unix)]
-            ConnTo::UnixPath(path) => UnixStream::connect(path).await.map(Self::Unix),
-            #[cfg(not(unix))]
-            ConnTo::UnixPath(_) => unreachable!("Unix socket is not supported on this platform"),
-        }
-        .map(Self::apply_socket_conf)
-    }
-
-    #[inline]
-    fn apply_socket_conf(self) -> Self {
+    pub(crate) fn apply_socket_conf(self) -> Self {
         match &self {
             Self::Tcp(dest_stream) => {
                 apply_socket_conf!(dest_stream);
@@ -121,38 +101,6 @@ impl RelayConn {
             Self::Tcp(mut dest_stream) => do_relay_io!(incoming, dest_stream),
             #[cfg(unix)]
             Self::Unix(mut dest_stream) => do_relay_io!(incoming, dest_stream),
-        }
-    }
-}
-
-pub(crate) enum ConnTo<P: AsRef<Path> = &'static str> {
-    /// Connect to a socket address.
-    SocketAddr(SocketAddr),
-
-    #[allow(dead_code, reason = "Unix socket is not supported on this platform")]
-    /// Connect to a Unix socket path.
-    UnixPath(P),
-}
-
-impl From<SocketAddr> for ConnTo {
-    fn from(addr: SocketAddr) -> Self {
-        Self::SocketAddr(addr)
-    }
-}
-
-#[cfg(unix)]
-impl<P: AsRef<Path>> From<P> for ConnTo<P> {
-    fn from(path: P) -> Self {
-        Self::UnixPath(path)
-    }
-}
-
-impl<'c> From<&'c Upstream> for ConnTo<&'c str> {
-    fn from(upstream: &'c Upstream) -> Self {
-        match upstream {
-            Upstream::SocketAddr(addr) => Self::SocketAddr(*addr),
-            #[cfg(unix)]
-            Upstream::Unix(path) => Self::UnixPath(path),
         }
     }
 }

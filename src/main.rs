@@ -1,5 +1,7 @@
 //! Simple-RProxy
 
+#![feature(let_chains)] // Will be stable in Rust 1.85, Rust Edition 2024
+
 mod config;
 mod error;
 mod peek;
@@ -10,11 +12,10 @@ mod utils;
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, OnceLock},
+    sync::{atomic::Ordering, Mutex},
 };
 
 use anyhow::Result;
-use arc_swap::ArcSwap;
 use mimalloc::MiMalloc;
 use tokio::task::JoinHandle;
 use tracing::Instrument;
@@ -25,10 +26,15 @@ static GLOBAL: MiMalloc = MiMalloc;
 #[tokio::main]
 async fn main() -> Result<()> {
     utils::init_tracing();
+
     tracing::info!("{} built at {}", utils::VERSION, utils::BUILD_TIME);
 
     // init global config from cmdline args or config file
-    config::Args::try_init()?;
+    let initialized = config::Cli::try_init()?;
+
+    if !initialized {
+        return Ok(());
+    }
 
     // create relay server.
     create_server().await?;
@@ -44,7 +50,7 @@ async fn main() -> Result<()> {
 }
 
 /// [`JoinHandle`] after spawning the server.
-static SERVER_HANDLE: OnceLock<ArcSwap<(JoinHandle<()>, utils::ConnCounter)>> = OnceLock::new();
+static SERVER_HANDLE: Mutex<Option<(JoinHandle<()>, utils::ConnCounter)>> = Mutex::new(None);
 
 #[inline]
 async fn create_server() -> Result<()> {
@@ -65,7 +71,7 @@ async fn create_server() -> Result<()> {
                         continue;
                     }
                     Err(e) => {
-                        tracing::error!("Failed to accept: {}", e);
+                        tracing::error!("Failed to accept: {:#?}", e);
                         break;
                     }
                 };
@@ -82,33 +88,69 @@ async fn create_server() -> Result<()> {
 
                     async {
                         let relay_conn = {
-                            let args = get_args!();
+                            let mut buf = [0u8; 256];
 
-                            let upstream = match peek::Peeker::is_target_host(&mut incoming).await {
-                                Ok(peek::PeekResult::Matched) => {
-                                    args.target_upstream.as_ref().unwrap()
-                                }
-                                Ok(peek::PeekResult::NotMatched) => {
-                                    args.default_upstream.as_ref().unwrap()
-                                }
-                                Ok(peek::PeekResult::NotHTTPS) => {
-                                    if args.https_only {
-                                        tracing::debug!(
-                                            "Not HTTPS, drop conn according to config."
-                                        );
-                                        return;
+                            let sni_name = match peek::PeekedTcpStream::new(&mut incoming)
+                                .peek_sni(&mut buf)
+                                .await
+                            {
+                                Ok(Some(sni_length)) => {
+                                    if sni_length != 0 {
+                                        #[allow(unsafe_code, reason = "Non-UTF-8 is OK")]
+                                        Some(unsafe {
+                                            std::str::from_utf8_unchecked(&buf[..sni_length])
+                                        })
                                     } else {
-                                        tracing::debug!("Not HTTPS, relay to default upstream.");
-                                        args.default_upstream.as_ref().unwrap()
+                                        None
                                     }
                                 }
+                                Ok(None) => {
+                                    tracing::debug!("Not HTTPS.");
+
+                                    if config::HTTPS_ONLY.load(Ordering::Relaxed) {
+                                        return;
+                                    }
+
+                                    None
+                                }
                                 Err(e) => {
-                                    tracing::error!("Error when peeking target host: {e:?}");
-                                    args.default_upstream.as_ref().unwrap()
+                                    tracing::error!("Error when peeking SNI: {e:?}");
+
+                                    None
                                 }
                             };
 
-                            match relay::RelayConn::new(upstream).await {
+                            let relay_conn = match sni_name {
+                                Some(sni_name) => {
+                                    tracing::debug!("SNI found: {sni_name}");
+
+                                    if let Some(upstream) = config::TARGET_UPSTREAMS.get(sni_name) {
+                                        tracing::debug!(
+                                            "Upstream [{}] matched for [{sni_name}]",
+                                            upstream.value()
+                                        );
+
+                                        upstream.connect().await
+                                    } else {
+                                        config::DEFAULT_UPSTREAM
+                                            .load()
+                                            .as_ref()
+                                            .unwrap()
+                                            .connect()
+                                            .await
+                                    }
+                                }
+                                None => {
+                                    config::DEFAULT_UPSTREAM
+                                        .load()
+                                        .as_ref()
+                                        .unwrap()
+                                        .connect()
+                                        .await
+                                }
+                            };
+
+                            match relay_conn {
                                 Ok(relay_conn) => relay_conn,
                                 Err(e) => {
                                     tracing::error!("Failed to connect to upstream: {e:?}",);
@@ -126,11 +168,15 @@ async fn create_server() -> Result<()> {
         })
     };
 
-    if let Err(last) = SERVER_HANDLE.set(ArcSwap::from(Arc::new((handler, conn_counter)))) {
+    let last = SERVER_HANDLE
+        .lock()
+        .unwrap_or_else(|l| l.into_inner())
+        .replace((handler, conn_counter));
+
+    if let Some(last) = last {
         tokio::spawn(async move {
-            let last = last.into_inner();
-            last.1.wait_conn_end(None).await;
             last.0.abort();
+            last.1.wait_conn_end(None).await;
         });
     }
 
@@ -150,7 +196,7 @@ async fn reload_handle() {
                 .await;
 
             tracing::info!("SIGHUP received, reloading config...");
-            let need_restart = config::Args::reload_config().unwrap_or_else(|e| {
+            let need_restart = config::Cli::reload_config().unwrap_or_else(|e| {
                 tracing::error!("Failed to reload config: {e}");
                 false
             });
@@ -194,4 +240,16 @@ async fn termination_handle() {
     }
 
     tracing::info!("signal received, shutdown");
+
+    let last = SERVER_HANDLE
+        .lock()
+        .unwrap_or_else(|l| l.into_inner())
+        .take();
+
+    if let Some(last) = last {
+        tokio::spawn(async move {
+            last.0.abort();
+            last.1.wait_conn_end(None).await;
+        });
+    }
 }

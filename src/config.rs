@@ -1,78 +1,111 @@
 use std::{
-    collections::HashSet,
-    fs, io,
+    fs,
     net::SocketAddr,
-    process::exit,
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, OnceLock,
+        Arc, LazyLock,
     },
 };
 
-use anyhow::{anyhow, bail, Result};
-use arc_swap::ArcSwap;
+use anyhow::{Context, Result};
+use arc_swap::ArcSwapOption;
 use clap::Parser;
-use once_cell::unsync::OnceCell;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Error;
+use crate::utils::{Upstream, VERSION};
 
-/// Global config
-pub(crate) static ARGS: OnceLock<ArcSwap<Args>> = OnceLock::new();
-/// Global proxy protocol flag
+/// type alia: upstream map
+type UpstreamMap = DashMap<Arc<str>, Arc<Upstream>, foldhash::fast::RandomState>;
+
+// Global config
+
+/// Global proxy protocol flag, optimized for performance.
+pub(crate) static HTTPS_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Global proxy protocol flag, optimized for performance.
 pub(crate) static USE_PROXY_PROTOCOL: AtomicBool = AtomicBool::new(false);
-/// Global target hosts set
-pub(crate) static TARGET_HOSTS: OnceLock<ArcSwap<HashSet<String, ahash::RandomState>>> =
-    OnceLock::new();
 
-#[macro_export]
-/// Get the global [Args] instance and get $name.
-macro_rules! get_args {
-    () => {
-        $crate::config::ARGS
-            .get()
-            .expect("ARGS must be initialized")
-            .load()
-    };
+/// Global default upstream
+pub(crate) static DEFAULT_UPSTREAM: ArcSwapOption<Upstream> = ArcSwapOption::const_empty();
+
+/// Global target upstreams map
+pub(crate) static TARGET_UPSTREAMS: LazyLock<UpstreamMap> = LazyLock::new(UpstreamMap::default);
+
+/// Global config, which is less frequently used.
+pub(crate) static CONFIG: ArcSwapOption<Config> = ArcSwapOption::const_empty();
+
+#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Config {
+    /// Local socket addr to bind to, default to be 0.0.0.0:443
+    pub listen: SocketAddr,
+
+    /// Default upstream to connect to.
+    pub default_upstream: Arc<Upstream>,
+
+    /// Upstreams to connect to.
+    pub upstream: DashMap<Arc<str>, Arc<Upstream>, foldhash::fast::RandomState>,
+
+    /// If set, only accept HTTPS connections.
+    pub https_only: bool,
+
+    /// If set, will connect upstream with PROXY protocol.
+    ///
+    /// Currently only support PROXY protocol v2.
+    pub proxy_protocol: bool,
 }
 
-#[derive(Debug, clap::Parser, Serialize, Deserialize)]
+impl Config {
+    /// Apply global config, return old config.
+    fn apply_global_config(self) -> Option<Arc<Self>> {
+        HTTPS_ONLY.store(self.https_only, Ordering::Relaxed);
+
+        USE_PROXY_PROTOCOL.store(self.proxy_protocol, Ordering::Relaxed);
+
+        DEFAULT_UPSTREAM.store(Some(Arc::clone(&self.default_upstream)));
+
+        TARGET_UPSTREAMS.clear();
+        self.upstream.iter().for_each(|kv| {
+            TARGET_UPSTREAMS.insert(Arc::clone(kv.key()), Arc::clone(kv.value()));
+        });
+
+        CONFIG.swap(Some(self.into()))
+    }
+}
+
+#[derive(Debug, clap::Parser)]
 #[command(version, about, long_about = None)]
-pub(crate) struct Args {
+pub(crate) struct Cli {
     #[arg(short, long)]
     /// Local socket addr to bind to, default to be 0.0.0.0:443
     pub listen: Option<SocketAddr>,
 
-    #[arg(long, value_parser = Upstream::parse)]
-    #[serde(
-        serialize_with = "Upstream::as_str",
-        deserialize_with = "Upstream::from_str"
-    )]
-    /// Default upstream like `nginx` to connect to.
+    #[arg(short, long, value_parser = Upstream::parse)]
+    /// Default upstream to connect to.
     ///
-    /// Notice: Unix socket path is only available on Unix platforms and must be
-    /// prefixed with `unix:`.
+    /// If no default upstream specified in `--upstream`, you must specify one
+    /// here.
+    pub default_upstream: Option<Arc<Upstream>>,
+
+    #[arg(short, long, value_parser = Upstream::parse_with_delimiter)]
+    /// Upstreams to connect to.
     ///
-    /// Example: `--default-upstream unix:/path/to/unix.sock` or `--upstream
-    /// 0.0.0.0:443`
-    pub default_upstream: Option<Upstream>,
+    /// The format should be `{TARGET_SNI}:{UPSTREAM}`.
+    ///
+    /// # Examples
+    ///
+    /// - `--upstream default:127.0.0.1:443` // default upstream
+    /// - `--upstream example.com:127.0.0.1:8443`
+    ///
+    /// # Notice
+    ///
+    /// If no default upstream specified, the first one will be used as default
+    /// upstream.
+    pub upstream: Option<DashMap<Arc<str>, Arc<Upstream>, foldhash::fast::RandomState>>,
 
-    #[arg(long, value_delimiter = ',')]
-    /// If any of `target_host`s is detected in incoming TLS stream SNI, the
-    /// underlying connection will be forwarded to the corresponding
-    /// `target_upstream`.
-    target_host: Vec<String>,
-
-    #[arg(long, value_parser = Upstream::parse)]
-    #[serde(
-        serialize_with = "Upstream::as_str",
-        deserialize_with = "Upstream::from_str"
-    )]
-    /// Target upstream to connect to when incoming TLS stream's SNI matches any
-    /// of `target_host`s.
-    pub target_upstream: Option<Upstream>,
-
-    #[arg(long)]
+    #[arg(long, default_value_t = true)]
     /// If set, only accept HTTPS connections.
     pub https_only: bool,
 
@@ -80,213 +113,161 @@ pub(crate) struct Args {
     /// If set, will connect upstream with PROXY protocol.
     ///
     /// Currently only support PROXY protocol v2.
-    proxy_protocol: bool,
+    pub proxy_protocol: bool,
+
+    #[clap(subcommand)]
+    /// Subcommand
+    subcommand: Option<SubCommand>,
 }
 
-impl Args {
-    pub(crate) fn try_init() -> Result<()> {
+#[derive(Debug, Clone, Copy)]
+#[derive(clap::Subcommand)]
+enum SubCommand {
+    /// Generate exxample config file.
+    GenerateConfig,
+
+    /// Print version and exit.
+    Version,
+}
+
+impl Cli {
+    /// Try init config from Cli / Config file, or exit early.
+    ///
+    /// Return true if can start or restart the server.
+    pub(crate) fn try_init() -> Result<bool> {
         let mut args = Self::parse();
 
-        let config_file = OnceCell::new();
+        // * Handle sub command
+        if let Some(cmd) = args.subcommand.take() {
+            match cmd {
+                SubCommand::GenerateConfig => {
+                    tracing::info!("Generating example config file...");
 
-        if args.listen.is_none() {
-            if let Ok(Some(listen)) = config_file
-                .get_or_try_init(Self::from_file)
-                .map(|f| f.listen)
-            {
-                args.listen = Some(listen);
-            } else {
-                args.listen = Some(SocketAddr::from(([0, 0, 0, 0], 443)));
+                    Self::gen_example_config_file()?;
+
+                    return Ok(false);
+                }
+                SubCommand::Version => {
+                    tracing::info!("Server version: {}", VERSION);
+
+                    return Ok(false);
+                }
             }
         }
 
-        if args.default_upstream.is_none() {
-            if let Some(default_iupstream) = config_file
-                .get_or_try_init(Self::from_file)?
-                .default_upstream
-                .clone()
-            {
-                args.default_upstream = Some(default_iupstream);
-            } else {
-                bail!("missing default upstream in both cmdline args and config file");
+        if let Some(config) = Self::load_config_file()? {
+            tracing::info!("Config loaded from file...");
+
+            config.apply_global_config();
+        } else {
+            let Cli {
+                listen,
+                default_upstream,
+                upstream,
+                https_only,
+                proxy_protocol,
+                subcommand: _,
+            } = args;
+
+            let listen = listen.unwrap_or_else(|| {
+                tracing::warn!("No listen addr specified, use default: 0.0.0.0:443");
+                SocketAddr::from(([0, 0, 0, 0], 443))
+            });
+
+            let upstream = upstream.unwrap_or_default();
+
+            let default_upstream = upstream
+                .get("default")
+                .map(|kv| Arc::clone(kv.value()))
+                .or(default_upstream)
+                .context("No default upstream set, see `--help` for more details")?;
+
+            Config {
+                listen,
+                default_upstream,
+                upstream,
+                https_only,
+                proxy_protocol,
             }
+            .apply_global_config();
         }
 
-        if args.target_host.is_empty() {
-            let target_host = &config_file.get_or_try_init(Self::from_file)?.target_host;
-            if !target_host.is_empty() {
-                args.target_host.clone_from(target_host);
-            } else {
-                bail!("missing target host in both cmdline args and config file");
-            }
-        }
-
-        if args.target_upstream.is_none() {
-            if let Some(target_upstream) = config_file
-                .get_or_try_init(Self::from_file)?
-                .target_upstream
-                .clone()
-            {
-                args.target_upstream = Some(target_upstream);
-            } else {
-                bail!("missing target upstream in both cmdline args and config file");
-            }
-        }
-
-        if !args.https_only {
-            args.https_only = config_file.get_or_try_init(Self::from_file)?.https_only;
-        }
-
-        if !args.proxy_protocol {
-            args.proxy_protocol = config_file.get_or_try_init(Self::from_file)?.proxy_protocol;
-        }
-
-        args.set_global();
-
-        Ok(())
+        Ok(true)
     }
 
     /// Reload config from file.
     ///
     /// If listen addr is changed, return true.
     pub(crate) fn reload_config() -> Result<bool> {
-        let listen = get_args!().listen;
+        let new_listen = {
+            CONFIG
+                .load()
+                .as_ref()
+                .expect("Cannot reload config before init")
+                .listen
+        };
 
-        Self::from_file()?.set_global();
+        let config = Self::load_config_file()?.context("Cannot reload without config file")?;
 
-        Ok(get_args!().listen == listen)
+        let old_config = CONFIG.swap(Some(config.into()));
+
+        #[allow(unsafe_code, reason = "Have checked old_config is not None")]
+        Ok(unsafe { old_config.unwrap_unchecked().listen != new_listen })
     }
 
-    fn set_global(self) {
-        tracing::debug!("Setting global config: \n###\n{:#?}\n###", &self);
-
-        if let Err(target_host) = TARGET_HOSTS.set(ArcSwap::from(Arc::new(HashSet::from_iter(
-            self.target_host.clone(),
-        )))) {
-            TARGET_HOSTS.get().unwrap().store(target_host.into_inner());
-        }
-
-        USE_PROXY_PROTOCOL.store(self.proxy_protocol, Ordering::Relaxed);
-
-        if let Err(args) = ARGS.set(ArcSwap::from(Arc::new(self))) {
-            ARGS.get().unwrap().store(args.into_inner());
-        }
-    }
-
-    fn from_file() -> Result<Self> {
-        match fs::OpenOptions::new()
-            .read(true)
+    fn gen_example_config_file() -> Result<()> {
+        let config_file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
             .write(true)
-            .open("./config.json")
-        {
-            Ok(config_file) => serde_json::from_reader(config_file).map_err(Into::into),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                tracing::info!(
-                    "Config file not found, generate example config and exit. DO RENAME to \
-                     `config.json` after editted."
-                );
+            .open("./config.example.json")
+            .context("Open ./config.example.json error")?;
 
-                if let Ok(f) = fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open("./config.example.json")
-                {
-                    let _ = serde_json::to_writer_pretty(
-                        f,
-                        &Args {
-                            listen: Some(SocketAddr::from(([0, 0, 0, 0], 443))),
-                            default_upstream: Some(Upstream::SocketAddr(SocketAddr::from((
-                                [127, 0, 0, 1],
-                                443,
-                            )))),
-                            target_host: vec!["example.com".to_string()],
-                            target_upstream: Some(Upstream::SocketAddr(SocketAddr::from((
-                                [127, 0, 0, 1],
-                                443,
-                            )))),
-                            https_only: false,
-                            proxy_protocol: false,
-                        },
-                    );
-                }
-
-                exit(0)
-            }
-            Err(e) => Err(anyhow!(e).context(Error::Config("IO"))),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Upstream to connect to.
-pub(crate) enum Upstream {
-    /// Upstream addr to connect to.
-    SocketAddr(SocketAddr),
-
-    #[cfg(unix)]
-    /// Unix socket path to connect to.
-    Unix(String),
-}
-
-impl Upstream {
-    /// Parse string to [Upstream], for [clap].
-    fn parse(s: &str) -> Result<Self> {
-        #[allow(unused_variables, reason = "cfg")]
-        if let Some(unix_path) = s.strip_prefix("unix:") {
+        let upstream = [
+            (
+                "example.com".into(),
+                Upstream::SocketAddr(SocketAddr::from(([127, 0, 0, 1], 8443))).into(),
+            ),
             #[cfg(unix)]
-            return Ok(Upstream::Unix(unix_path.to_string()));
-            #[cfg(not(unix))]
-            bail!("Unix socket path is not supported on this platform");
-        } else {
-            match s.parse() {
-                Ok(addr) => Ok(Upstream::SocketAddr(addr)),
-                Err(_) => bail!("Invalid upstream. See help for more details"),
-            }
-        }
+            (
+                "unix-path.example.com".into(),
+                Upstream::Unix("unix:/run/nginx/example.sock".to_string()).into(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let config = Config {
+            listen: SocketAddr::from(([0, 0, 0, 0], 443)),
+            default_upstream: Upstream::SocketAddr(SocketAddr::from(([127, 0, 0, 1], 8443))).into(),
+            upstream,
+            https_only: true,
+            proxy_protocol: false,
+        };
+
+        serde_json::to_writer_pretty(config_file, &config)
+            .context("Write config.example.json error")?;
+
+        tracing::info!("Config file generated, please edit, rename to `config.json` and restart.");
+
+        Ok(())
     }
 
-    fn from_str<'de, D>(deserializer: D) -> Result<Option<Self>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error;
+    fn load_config_file() -> Result<Option<Config>> {
+        let file_path = Path::new("./config.json");
 
-        let string = Option::<String>::deserialize(deserializer)?;
-
-        if string.is_none() {
+        if !file_path.exists() {
+            tracing::info!("No config file found");
             return Ok(None);
         }
 
-        let string = string.unwrap();
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .open(file_path)
+            .context("Open config file error")?;
 
-        #[allow(unused_variables, reason = "cfg")]
-        if let Some(unix_path) = string.strip_prefix("unix:") {
-            #[cfg(unix)]
-            return Ok(Some(Upstream::Unix(unix_path.to_string())));
-            #[cfg(not(unix))]
-            return Err(D::Error::custom(
-                "Unix socket path is not supported on this platform",
-            ));
-        } else {
-            match string.parse() {
-                Ok(addr) => Ok(Some(Upstream::SocketAddr(addr))),
-                Err(_) => Err(D::Error::custom(format!(
-                    "Invalid upstream `{string}`. See help for more details"
-                ))),
-            }
-        }
-    }
-
-    fn as_str<S>(v: &Option<Self>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match v {
-            Some(Upstream::SocketAddr(addr)) => addr.to_string().serialize(serializer),
-            #[cfg(unix)]
-            Some(Upstream::Unix(path)) => format!("unix:{}", path).serialize(serializer),
-            None => "".serialize(serializer),
-        }
+        serde_json::from_reader(file)
+            .map(Some)
+            .context("Parse config file error")
     }
 }

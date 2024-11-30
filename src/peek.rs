@@ -1,36 +1,52 @@
-//! Peek TLS Stream
+//! `TcpStream` with peek.
 
-use anyhow::{bail, Result};
+use std::ops;
+
+use anyhow::{bail, Context, Result};
 use tokio::net::TcpStream;
 
-use crate::{config::TARGET_HOSTS, error::Error};
+use crate::error::Error;
 
-#[derive(Debug, Clone, Copy)]
-/// Peek result
-pub(crate) enum PeekResult {
-    /// The stream is not a HTTPS stream.
-    NotHTTPS,
+#[derive(Debug)]
+pub(crate) struct PeekedTcpStream<'tcp>(&'tcp mut TcpStream);
 
-    /// The stream is a TLS stream but not matched any target hosts.
-    NotMatched,
+impl ops::Deref for PeekedTcpStream<'_> {
+    type Target = TcpStream;
 
-    /// The stream is a TLS stream and matched a target host.
-    Matched,
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct Peeker;
-
-impl Peeker {
+impl ops::DerefMut for PeekedTcpStream<'_> {
     #[inline]
-    /// Peek the stream (maybe tls stream) and see if it contains any of the
-    /// target hosts.
-    pub(crate) async fn is_target_host(stream: &mut TcpStream) -> Result<PeekResult> {
-        if Self::try_peek::<1>(stream).await[0] != 0x16 {
-            return Ok(PeekResult::NotHTTPS);
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+    }
+}
+
+impl<'tcp> PeekedTcpStream<'tcp> {
+    #[inline]
+    pub(crate) const fn new(tcp_stream: &'tcp mut TcpStream) -> Self {
+        Self(tcp_stream)
+    }
+
+    #[inline]
+    /// Peek the inner TCP stream (maybe TLS stream), write SNI to given buffer
+    /// and return the peeked SNI' length.
+    pub(crate) async fn peek_sni(mut self, sni_buf: &mut [u8; 256]) -> Result<Option<usize>> {
+        if self.peek_slice::<1>().await?[0] != 0x16 {
+            return Ok(None);
         }
 
-        let buf = Self::try_peek::<1024>(stream).await;
+        // ! The typical size of TLS client hello is 252 bytes.
+        // !
+        // ! However, X25519Kyber768Draft00 relies on the TLS key_share extension,
+        // ! causing the size of the TLS Client Hello sent during the TLS
+        // ! handshake with the built-in TLS implementation of Go 1.23 to increase
+        // ! from the typical 252 bytes to 1476 bytes.
+        let buf = self.peek_slice::<256>().await?;
 
         let mut cursor = 43usize;
 
@@ -87,87 +103,69 @@ impl Peeker {
         });
 
         let mut retry_count = 0;
+
         loop {
             let buf = match retry_count {
                 0 => &buf,
-                1 => &Self::try_peek::<1536>(stream).await[..],
-                2 => &Self::try_peek::<2048>(stream).await[..],
-                3 => &Self::try_peek::<3072>(stream).await[..],
-                4 => &Self::try_peek::<4096>(stream).await[..],
+                1 => &self.peek_slice::<1536>().await?[..],
+                2 => &self.peek_slice::<2048>().await?[..],
+                3 => &self.peek_slice::<3072>().await?[..],
+                4 => &self.peek_slice::<4096>().await?[..],
                 _ => bail!(Error::ClientHello("too long")),
             };
 
-            let sni = Self::find_server_name(&mut cursor, buf)?;
+            let mut sni_length = None;
 
-            if sni.is_some_and(|sni| {
-                TARGET_HOSTS
-                    .get()
-                    .expect("TARGET_HOSTS must be inititalized before usage")
-                    .load()
-                    .contains(sni)
-            }) {
-                tracing::debug!(
-                    "SNI matched target host {}, {retry_count} peek costed.",
-                    sni.unwrap()
-                );
-                return Ok(PeekResult::Matched);
-            } else if sni.is_some() {
-                tracing::debug!("SNI not matched: {}.", sni.unwrap());
-                return Ok(PeekResult::NotMatched);
+            while sni_length.is_none()
+                && let Some(extension_prefix) = buf.get(cursor..cursor + 4)
+            {
+                let extension_length =
+                    u16::from_be_bytes([extension_prefix[2], extension_prefix[3]]) as usize;
+
+                if extension_prefix[0..2] == [0x00, 0x00] {
+                    tracing::debug!("Ext `server_name` found at byte cursor {cursor}.");
+
+                    // ! | Server name | bytes of "server name" extension data follows |
+                    // ! | 00 00       | XX XX                                         |
+                    // ! | bytes of first list entry follows | list entry type |
+                    // ! | XX XX                             | 00              |
+                    // ! | bytes of hostname follows |
+                    // ! | XX XX                     |
+                    cursor += 7;
+
+                    sni_length = get_bytes!(2, THEN: hostname_prefix => {
+                        Some(u16::from_be_bytes([hostname_prefix[0], hostname_prefix[1]]) as usize)
+                    });
+
+                    break;
+                }
+
+                cursor += 4;
+                cursor += extension_length;
+            }
+
+            if let Some(sni_length) = sni_length {
+                sni_buf
+                    .get_mut(..sni_length)
+                    .context(Error::ClientHello("SNI too long"))?
+                    .copy_from_slice(&buf[cursor..cursor + sni_length]);
+
+                return Ok(Some(sni_length));
             } else {
-                tracing::debug!("SNI not found. Peeking more.");
+                tracing::warn!("SNI not found, try peeking more...");
+
                 retry_count += 1;
             }
         }
     }
 
     #[inline(always)]
-    async fn try_peek<const BUF_LEN: usize>(stream: &mut TcpStream) -> [u8; BUF_LEN] {
+    async fn peek_slice<const BUF_LEN: usize>(&mut self) -> Result<[u8; BUF_LEN]> {
         let mut buf = [0u8; BUF_LEN];
 
-        if let Err(e) = stream.peek(&mut buf).await {
-            tracing::error!("Peek failed: {:?}", e);
-        };
-
-        buf
-    }
-
-    #[inline]
-    fn find_server_name<'a>(cursor: &mut usize, bytes: &'a [u8]) -> Result<Option<&'a str>> {
-        while let Some(extension_prefix) = bytes.get(*cursor..*cursor + 4) {
-            let extension_length =
-                u16::from_be_bytes([extension_prefix[2], extension_prefix[3]]) as usize;
-
-            *cursor += 4;
-
-            if extension_prefix[0..2] == [0x00, 0x00] {
-                tracing::debug!("Ext `server_name` found.");
-
-                let server_name =
-                    bytes
-                        .get(*cursor..*cursor + extension_length)
-                        .ok_or_else(|| {
-                            tracing::error!("Peeked buf is not sufficient: {:02x?}", bytes);
-
-                            Error::ClientHello("failed to get SNI")
-                        })?;
-
-                let server_name = server_name.get(5..).unwrap_or_else(|| {
-                    if server_name.is_empty() {
-                        tracing::debug!("Empty SNI");
-                    } else {
-                        tracing::warn!("Invalid SNI: {:02x?}", server_name);
-                    }
-                    &[]
-                });
-
-                #[allow(unsafe_code, reason = "Non-UTF-8 SNI is OK")]
-                return Ok(Some(unsafe { std::str::from_utf8_unchecked(server_name) }));
-            }
-
-            *cursor += extension_length;
-        }
-
-        Ok(None)
+        self.peek(&mut buf)
+            .await
+            .map(move |_| buf)
+            .context(Error::Peek)
     }
 }
