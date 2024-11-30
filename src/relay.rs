@@ -3,14 +3,14 @@
 use std::{io, net::SocketAddr, path::Path, sync::atomic::Ordering};
 
 use anyhow::{anyhow, Context, Result};
-use proxy_header::{ProxiedAddress, ProxyHeader};
-use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
     apply_socket_conf,
     config::{Upstream, USE_PROXY_PROTOCOL},
+    proxy_protocol::encode_proxy_header_v2,
 };
 
 /// Connected to a destination.
@@ -64,36 +64,21 @@ impl RelayConn {
         macro_rules! do_relay_io {
             ($incoming:expr, $dest_stream:expr) => {{
                 if USE_PROXY_PROTOCOL.load(Ordering::Relaxed) {
-                    let header = ProxyHeader::with_address(ProxiedAddress::stream(
-                        $incoming.peer_addr()?,
-                        $incoming.local_addr()?,
-                    ));
+                    let (len, buf) =
+                        encode_proxy_header_v2($incoming.peer_addr()?, $incoming.local_addr()?)
+                            .expect("Socket address, addr family match");
 
-                    let mut buf = [0u8; 1024];
+                    $dest_stream
+                        .writable()
+                        .await
+                        .context("Failed to write PROXY Protocol headers: not writable")?;
 
-                    let len = header
-                        .encode_to_slice_v2(&mut buf)
-                        .context("Failed to encode PROXY Protocol headers")?;
+                    $dest_stream
+                        .write_all(&buf[0..len])
+                        .await
+                        .context("Failed to write PROXY Protocol headers")?;
 
-                    loop {
-                        $dest_stream
-                            .writable()
-                            .await
-                            .context("Failed to write PROXY Protocol headers: not writable")?;
-
-                        match $dest_stream.try_write(&buf[0..len]) {
-                            Ok(writed_len) => {
-                                debug_assert_eq!(writed_len, len);
-                                break;
-                            }
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                            Err(e) => {
-                                return Err(anyhow!(e).context(
-                                    "Failed to write PROXY Protocol headers: unknown error",
-                                ))
-                            }
-                        }
-                    }
+                    tracing::debug!("PROXY Protocol headers sent, add up to {len} bytes");
                 };
 
                 #[cfg(unix)]

@@ -3,6 +3,7 @@
 mod config;
 mod error;
 mod peek;
+mod proxy_protocol;
 mod relay;
 mod utils;
 
