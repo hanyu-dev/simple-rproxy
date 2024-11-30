@@ -162,7 +162,25 @@ async fn create_server() -> Result<()> {
                             }
                         };
 
-                        let _ = relay_conn.relay_io(incoming).await;
+                        if let Err(e) = relay_conn.relay_io(incoming).await {
+                            match e.downcast_ref::<io::Error>().map(|e| e.kind()) {
+                                Some(io::ErrorKind::BrokenPipe) => {
+                                    // Some poor implemented client will do so.
+                                    tracing::debug!("Connection closed unexpectedly");
+
+                                    return;
+                                }
+                                Some(io::ErrorKind::ConnectionReset) => {
+                                    // Some poor implemented client will do so.
+                                    tracing::debug!("Connection reset by peer");
+
+                                    return;
+                                }
+                                _ => {}
+                            }
+
+                            tracing::error!("Unexpected error: {:#?}", e);
+                        }
                     }
                     .instrument(span)
                     .await

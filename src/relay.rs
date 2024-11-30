@@ -37,7 +37,7 @@ impl RelayConn {
         self
     }
 
-    #[tracing::instrument(level = "debug", skip_all, err(Debug))]
+    #[tracing::instrument(level = "debug", skip_all)]
     #[inline]
     /// Perform IO relay between the client and the destination.
     pub async fn relay_io(self, mut incoming: TcpStream) -> Result<()> {
@@ -72,11 +72,6 @@ impl RelayConn {
                         return Ok(());
                     }
                     Err(e) => match e.kind() {
-                        io::ErrorKind::BrokenPipe => {
-                            tracing::debug!("Connection closed unexpectedly");
-
-                            return Ok(());
-                        }
                         io::ErrorKind::InvalidInput => {
                             tracing::warn!("Fallback to copy bidirectional with buffer");
                         }
