@@ -17,7 +17,7 @@ pub(crate) enum RelayConn {
     Tcp(TcpStream),
 
     #[cfg(unix)]
-    /// [`UnixStream`](tokio::net::UnixStream)
+    /// [`UnixStream`]
     Unix(UnixStream),
 }
 

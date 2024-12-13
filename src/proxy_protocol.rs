@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 use const_for::const_for;
 
+#[inline]
 /// Encode PROXY protocol header.
 ///
 /// Currently we only suoport PROXY protocol v2.

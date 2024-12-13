@@ -11,8 +11,10 @@ mod utils;
 
 use std::{
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Mutex, atomic::Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::Result;
@@ -37,7 +39,7 @@ async fn main() -> Result<()> {
     }
 
     // create relay server.
-    create_server().await?;
+    run().await?;
 
     #[cfg(unix)]
     // install signal handler for SIGHUP
@@ -50,155 +52,147 @@ async fn main() -> Result<()> {
 }
 
 /// [`JoinHandle`] after spawning the server.
-static SERVER_HANDLE: Mutex<Option<(JoinHandle<()>, utils::ConnCounter)>> = Mutex::new(None);
+static SERVER_HANDLE: Mutex<Option<(JoinHandle<()>, Arc<AtomicBool>)>> = Mutex::new(None);
 
 #[inline]
-async fn create_server() -> Result<()> {
+async fn run() -> Result<()> {
+    let canceller_tx = Arc::new(AtomicBool::new(false));
+
     let listener = utils::create_listener()?;
+    let canceller_rx = canceller_tx.clone();
+    let handler = tokio::spawn(async move {
+        loop {
+            let (mut incoming, remote_addr) = match listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => {
+                    tracing::debug!("Connection aborted.");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to accept: {:#?}", e);
+                    break;
+                }
+            };
 
-    let conn_counter = utils::ConnCounter::new();
-    let handler = {
-        let conn_counter = conn_counter.clone();
-        tokio::spawn(async move {
-            loop {
-                let mut incoming = match listener.accept().await {
-                    Ok((incoming, addr)) => {
-                        tracing::debug!("Connection from [{addr}] accepted");
-                        incoming
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => {
-                        tracing::debug!("Conn aborted.");
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to accept: {:#?}", e);
-                        break;
-                    }
-                };
+            tokio::spawn(async move {
+                let root_span = tracing::debug_span!("conn_handler", remote_addr = ?remote_addr);
 
-                let conn_counter = conn_counter.clone();
-                tokio::spawn(async move {
-                    let span = tracing::debug_span!("conn_handler", remote_addr = ?incoming.peer_addr().unwrap_or_else(|e| {
-                            tracing::error!("Failed to get remote addr: {e:?}");
-                            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
-                        })
-                    );
+                async {
+                    let relay_conn = {
+                        // SNI is no longer than 256 bytes
+                        let mut buf = [0u8; 256];
 
-                    conn_counter.conn_established();
-
-                    async {
-                        let relay_conn = {
-                            let mut buf = [0u8; 256];
-
-                            let sni_name = match peek::PeekedTcpStream::new(&mut incoming)
-                                .peek_sni(&mut buf)
-                                .await
-                            {
-                                Ok(Some(sni_length)) => {
-                                    if sni_length != 0 {
-                                        #[allow(unsafe_code, reason = "Non-UTF-8 is OK")]
-                                        Some(unsafe {
-                                            std::str::from_utf8_unchecked(&buf[..sni_length])
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                }
-                                Ok(None) => {
-                                    tracing::debug!("Not HTTPS.");
-
-                                    if config::HTTPS_ONLY.load(Ordering::Relaxed) {
-                                        return;
-                                    }
-
+                        let sni_name = match peek::PeekedTcpStream::new(&mut incoming)
+                            .peek_sni(&mut buf)
+                            .await
+                        {
+                            Ok(Some(sni_length)) => {
+                                if sni_length != 0 {
+                                    #[allow(unsafe_code, reason = "Non-UTF-8 is OK")]
+                                    Some(unsafe {
+                                        std::str::from_utf8_unchecked(&buf[..sni_length])
+                                    })
+                                } else {
                                     None
                                 }
-                                Err(e) => {
-                                    tracing::error!("Error when peeking SNI: {e:?}");
+                            }
+                            Ok(None) => {
+                                tracing::debug!("Not HTTPS.");
 
-                                    None
-                                }
-                            };
-
-                            let relay_conn = match sni_name {
-                                Some(sni_name) => {
-                                    tracing::debug!("SNI found: {sni_name}");
-
-                                    match config::TARGET_UPSTREAMS.get(sni_name) {
-                                        Some(upstream) => {
-                                            tracing::debug!(
-                                                "Upstream [{}] matched for [{sni_name}]",
-                                                upstream.value()
-                                            );
-
-                                            upstream.connect().await
-                                        }
-                                        _ => {
-                                            config::DEFAULT_UPSTREAM
-                                                .load()
-                                                .as_ref()
-                                                .unwrap()
-                                                .connect()
-                                                .await
-                                        }
-                                    }
-                                }
-                                None => {
-                                    config::DEFAULT_UPSTREAM
-                                        .load()
-                                        .as_ref()
-                                        .unwrap()
-                                        .connect()
-                                        .await
-                                }
-                            };
-
-                            match relay_conn {
-                                Ok(relay_conn) => relay_conn,
-                                Err(e) => {
-                                    tracing::error!("Failed to connect to upstream: {e:?}",);
+                                if config::HTTPS_ONLY.load(Ordering::Relaxed) {
                                     return;
                                 }
+
+                                None
+                            }
+                            Err(e) => {
+                                tracing::error!("Error when peeking SNI: {e:?}");
+
+                                None
                             }
                         };
 
-                        if let Err(e) = relay_conn.relay_io(incoming).await {
-                            match e.downcast_ref::<io::Error>().map(|e| e.kind()) {
-                                Some(io::ErrorKind::BrokenPipe) => {
-                                    // Some poor implemented client will do so.
-                                    tracing::debug!("Connection closed unexpectedly");
+                        let relay_conn = match sni_name {
+                            Some(sni_name) => {
+                                tracing::debug!("SNI found: {sni_name}");
 
-                                    return;
-                                }
-                                Some(io::ErrorKind::ConnectionReset) => {
-                                    // Some poor implemented client will do so.
-                                    tracing::debug!("Connection reset by peer");
+                                match config::TARGET_UPSTREAMS.get(sni_name) {
+                                    Some(upstream) => {
+                                        tracing::debug!(
+                                            "Upstream [{}] matched for [{sni_name}]",
+                                            upstream.value()
+                                        );
 
-                                    return;
+                                        upstream.connect().await
+                                    }
+                                    _ => {
+                                        config::DEFAULT_UPSTREAM
+                                            .load()
+                                            .as_ref()
+                                            .unwrap()
+                                            .connect()
+                                            .await
+                                    }
                                 }
-                                _ => {}
                             }
+                            None => {
+                                config::DEFAULT_UPSTREAM
+                                    .load()
+                                    .as_ref()
+                                    .unwrap()
+                                    .connect()
+                                    .await
+                            }
+                        };
 
-                            tracing::error!("Unexpected error: {:#?}", e);
+                        match relay_conn {
+                            Ok(relay_conn) => relay_conn,
+                            Err(e) => {
+                                tracing::error!("Failed to connect to upstream: {e:?}",);
+                                return;
+                            }
                         }
+                    };
+
+                    if let Err(e) = relay_conn.relay_io(incoming).await {
+                        match e.downcast_ref::<io::Error>().map(|e| e.kind()) {
+                            Some(io::ErrorKind::BrokenPipe) => {
+                                // Some poor implemented client will do so.
+                                tracing::debug!("Connection closed unexpectedly");
+
+                                return;
+                            }
+                            Some(io::ErrorKind::ConnectionReset) => {
+                                // Some poor implemented client will do so.
+                                tracing::debug!("Connection reset by peer");
+
+                                return;
+                            }
+                            _ => {}
+                        }
+
+                        tracing::error!("Unexpected error: {e:#?}");
                     }
-                    .instrument(span)
-                    .await
-                });
+                }
+                .instrument(root_span)
+                .await;
+            });
+
+            if canceller_rx.load(Ordering::Relaxed) {
+                break;
             }
-        })
-    };
+        }
+    });
 
     let last = SERVER_HANDLE
         .lock()
         .unwrap_or_else(|l| l.into_inner())
-        .replace((handler, conn_counter));
+        .replace((handler, canceller_tx));
 
-    if let Some(last) = last {
-        tokio::spawn(async move {
-            last.0.abort();
-            last.1.wait_conn_end(None).await;
-        });
+    if let Some((_, last_canceller)) = last {
+        last_canceller.store(true, Ordering::Relaxed);
+        // Just leave the old handler running, no more new connection will be
+        // accepted.
     }
 
     Ok(())
@@ -207,34 +201,37 @@ async fn create_server() -> Result<()> {
 #[cfg(unix)]
 /// Create a signal handler for SIGHUP to gracefully reload server.
 async fn reload_handle() {
-    use tokio::signal;
+    use tokio::signal::unix::{SignalKind, signal};
 
     tokio::spawn(async move {
         loop {
-            signal::unix::signal(signal::unix::SignalKind::hangup())
-                .expect("failed to install signal handler")
+            signal(SignalKind::hangup())
+                .expect("Failed to install signal handler")
                 .recv()
                 .await;
 
             tracing::info!("SIGHUP received, reloading config...");
-            let need_restart = config::Cli::reload_config().unwrap_or_else(|e| {
-                tracing::error!("Failed to reload config: {e}");
-                false
-            });
 
-            if need_restart {
-                tracing::info!("Gracefully restarting server...");
+            match config::Cli::reload_config() {
+                Ok(true) => {
+                    tracing::info!("Config reloaded, restarting server...");
 
-                if let Err(e) = create_server().await {
-                    tracing::error!("Failed to restart server: {e}");
+                    if let Err(e) = run().await {
+                        tracing::error!("Failed to restart server: {e:?}");
+                    }
+                }
+                Ok(false) => {
+                    tracing::info!("Config reloaded.");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to reload config: {e:?}");
                 }
             }
         }
     });
 }
 
-/// `shutdown_signal` will inform axum to gracefully shutdown when the process
-/// is asked to shutdown.
+/// `termination_handle` will force the server to shutdown.
 async fn termination_handle() {
     use tokio::signal;
 
@@ -261,16 +258,4 @@ async fn termination_handle() {
     }
 
     tracing::info!("signal received, shutdown");
-
-    let last = SERVER_HANDLE
-        .lock()
-        .unwrap_or_else(|l| l.into_inner())
-        .take();
-
-    if let Some(last) = last {
-        tokio::spawn(async move {
-            last.0.abort();
-            last.1.wait_conn_end(None).await;
-        });
-    }
 }

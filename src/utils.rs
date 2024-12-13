@@ -1,20 +1,14 @@
 use std::{
     fmt, io,
     net::SocketAddr,
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
 use anyhow::{Context, Result};
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use tokio::{
-    net::{TcpListener, TcpSocket, TcpStream},
-    time::sleep,
-};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tracing_subscriber::fmt::time::ChronoLocal;
 
 use crate::{config, relay::RelayConn};
@@ -88,53 +82,6 @@ macro_rules! apply_socket_conf {
         let _ = sock_ref.set_nodelay(true);
         let _ = sock_ref.set_nonblocking(true);
     }};
-}
-
-#[derive(Debug, Clone)]
-/// Conn counter
-pub(crate) struct ConnCounter {
-    inner: Arc<AtomicUsize>,
-}
-
-impl ConnCounter {
-    #[inline]
-    /// Create a new [`ConnCounter`].
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    #[inline]
-    /// Increment the connection counter.
-    pub(crate) fn conn_established(&self) {
-        self.inner.fetch_add(1, Ordering::AcqRel);
-    }
-
-    #[inline]
-    /// Wait for all connections to be closed or force exit after the given
-    /// duration.
-    ///
-    /// Default to wait for 15 sec
-    pub(crate) async fn wait_conn_end(&self, force: Option<Duration>) {
-        tokio::select! {
-            biased;
-            _ = async {
-                while self.inner.load(Ordering::Acquire) > 0 {
-                    sleep(Duration::from_millis(300)).await;
-                }
-            } => {},
-            _ = sleep(force.unwrap_or(Duration::from_secs(15))) => {
-                tracing::warn!("Gracefully shutdown time limit exceeded");
-            }
-        }
-    }
-}
-
-impl Drop for ConnCounter {
-    fn drop(&mut self) {
-        self.inner.fetch_sub(1, Ordering::AcqRel);
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
