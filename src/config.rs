@@ -14,7 +14,7 @@ use clap::Parser;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::utils::{Upstream, VERSION};
+use crate::utils::{Upstream, UpstreamArg, VERSION};
 
 /// type alia: upstream map
 type UpstreamMap = DashMap<Arc<str>, Arc<Upstream>, foldhash::fast::RandomState>;
@@ -23,9 +23,6 @@ type UpstreamMap = DashMap<Arc<str>, Arc<Upstream>, foldhash::fast::RandomState>
 
 /// Global proxy protocol flag, optimized for performance.
 pub(crate) static HTTPS_ONLY: AtomicBool = AtomicBool::new(false);
-
-/// Global proxy protocol flag, optimized for performance.
-pub(crate) static USE_PROXY_PROTOCOL: AtomicBool = AtomicBool::new(false);
 
 /// Global default upstream
 pub(crate) static DEFAULT_UPSTREAM: ArcSwapOption<Upstream> = ArcSwapOption::const_empty();
@@ -36,9 +33,15 @@ pub(crate) static TARGET_UPSTREAMS: LazyLock<UpstreamMap> = LazyLock::new(Upstre
 /// Global config, which is less frequently used.
 pub(crate) static CONFIG: ArcSwapOption<Config> = ArcSwapOption::const_empty();
 
+/// Config version
+const CONFIG_VERSION: u8 = 1;
+
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Config {
+    /// Version of config file.
+    pub version: u8,
+
     /// Local socket addr to bind to, default to be 0.0.0.0:443
     pub listen: SocketAddr,
 
@@ -46,23 +49,16 @@ pub(crate) struct Config {
     pub default_upstream: Arc<Upstream>,
 
     /// Upstreams to connect to.
-    pub upstream: DashMap<Arc<str>, Arc<Upstream>, foldhash::fast::RandomState>,
+    pub upstream: UpstreamMap,
 
     /// If set, only accept HTTPS connections.
     pub https_only: bool,
-
-    /// If set, will connect upstream with PROXY protocol.
-    ///
-    /// Currently only support PROXY protocol v2.
-    pub proxy_protocol: bool,
 }
 
 impl Config {
     /// Apply global config, return old config.
     fn apply_global_config(self) -> Option<Arc<Self>> {
         HTTPS_ONLY.store(self.https_only, Ordering::Relaxed);
-
-        USE_PROXY_PROTOCOL.store(self.proxy_protocol, Ordering::Relaxed);
 
         DEFAULT_UPSTREAM.store(Some(Arc::clone(&self.default_upstream)));
 
@@ -89,31 +85,29 @@ pub(crate) struct Cli {
     /// here.
     pub default_upstream: Option<Arc<Upstream>>,
 
-    #[arg(short, long, value_parser = Upstream::parse_with_delimiter)]
+    #[arg(short, long)]
     /// Upstreams to connect to.
     ///
     /// The format should be `{TARGET_SNI}:{UPSTREAM}`.
     ///
     /// # Examples
     ///
-    /// - `--upstream default:127.0.0.1:443` // default upstream
-    /// - `--upstream example.com:127.0.0.1:8443`
+    /// - `default:127.0.0.1:443` // default upstream
+    /// - `example.com:127.0.0.1:8443` // {SNI}:{UPSTREAM}
+    /// - `PROXY_PROTOCOL_V2@example.com:127.0.0.1:443` // The upstream accepts
+    ///   proxy protocol v2.
+    ///
+    ///   Notes: V1 version is not supported.
     ///
     /// # Notice
     ///
     /// If no default upstream specified, the first one will be used as default
     /// upstream.
-    pub upstream: Option<DashMap<Arc<str>, Arc<Upstream>, foldhash::fast::RandomState>>,
+    pub upstream: Vec<UpstreamArg>,
 
     #[arg(long, default_value_t = true)]
     /// If set, only accept HTTPS connections.
     pub https_only: bool,
-
-    #[arg(long, default_value_t = false)]
-    /// If set, will connect upstream with PROXY protocol.
-    ///
-    /// Currently only support PROXY protocol v2.
-    pub proxy_protocol: bool,
 
     #[clap(subcommand)]
     /// Subcommand
@@ -157,17 +151,18 @@ impl Cli {
 
         match Self::load_config_file()? {
             Some(config) => {
-                tracing::info!("Config loaded from file...");
+                tracing::info!("Config loaded from file: {config:#?}");
 
                 config.apply_global_config();
             }
             _ => {
+                tracing::info!("No config file found, use CLI args to init config.");
+
                 let Cli {
                     listen,
                     default_upstream,
                     upstream,
                     https_only,
-                    proxy_protocol,
                     subcommand: _,
                 } = args;
 
@@ -176,22 +171,27 @@ impl Cli {
                     SocketAddr::from(([0, 0, 0, 0], 443))
                 });
 
-                let upstream = upstream.unwrap_or_default();
+                let upstream: DashMap<_, _, _> = upstream
+                    .into_iter()
+                    .map(|UpstreamArg { sni, upstream }| (sni, upstream))
+                    .collect();
 
                 let default_upstream = upstream
-                    .get("default")
-                    .map(|kv| Arc::clone(kv.value()))
+                    .remove("default")
+                    .map(|(_, value)| value)
                     .or(default_upstream)
                     .context("No default upstream set, see `--help` for more details")?;
 
-                Config {
+                let config = Config {
+                    version: CONFIG_VERSION,
                     listen,
                     default_upstream,
                     upstream,
                     https_only,
-                    proxy_protocol,
-                }
-                .apply_global_config();
+                };
+
+                tracing::info!("Config loaded from CLI args: {config:#?}");
+                config.apply_global_config();
             }
         }
 
@@ -229,23 +229,40 @@ impl Cli {
         let upstream = [
             (
                 "example.com".into(),
-                Upstream::SocketAddr(SocketAddr::from(([127, 0, 0, 1], 8443))).into(),
+                Upstream::parse("127.0.0.1:8443").unwrap().into(),
+            ),
+            (
+                "example-proxy-protocol-v2.com".into(),
+                Upstream::parse("127.0.0.1:8443")
+                    .unwrap()
+                    .set_proxy_protocol(true)
+                    .into(),
             ),
             #[cfg(unix)]
             (
                 "unix-path.example.com".into(),
-                Upstream::Unix("/run/nginx/example.sock".to_string()).into(),
+                Upstream::parse("unix:/run/nginx/example.sock")
+                    .unwrap()
+                    .into(),
+            ),
+            #[cfg(unix)]
+            (
+                "unix-path.example-proxy-protocol-v2.com".into(),
+                Upstream::parse("unix:/run/nginx/example.sock")
+                    .unwrap()
+                    .set_proxy_protocol(true)
+                    .into(),
             ),
         ]
         .into_iter()
         .collect();
 
         let config = Config {
+            version: CONFIG_VERSION,
             listen: SocketAddr::from(([0, 0, 0, 0], 443)),
-            default_upstream: Upstream::SocketAddr(SocketAddr::from(([127, 0, 0, 1], 8443))).into(),
+            default_upstream: Upstream::parse("127.0.0.1:8443").unwrap().into(),
             upstream,
             https_only: true,
-            proxy_protocol: false,
         };
 
         serde_json::to_writer_pretty(config_file, &config)

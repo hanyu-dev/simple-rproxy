@@ -1,11 +1,12 @@
 use std::{
     fmt, io,
     net::SocketAddr,
+    str::FromStr,
     sync::{Arc, LazyLock},
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -86,7 +87,7 @@ macro_rules! apply_socket_conf {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Upstream to connect to.
-pub(crate) enum Upstream {
+enum UpstreamAddr {
     /// Upstream addr to connect to.
     SocketAddr(SocketAddr),
 
@@ -95,75 +96,114 @@ pub(crate) enum Upstream {
     Unix(String),
 }
 
+#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+/// Upstream configuration.
+pub(crate) struct Upstream {
+    /// Upstream addr to connect to.
+    addr: UpstreamAddr,
+
+    /// Proxy protocol to use.
+    pub(crate) proxy_protocol: bool,
+}
+
+impl From<SocketAddr> for Upstream {
+    fn from(addr: SocketAddr) -> Self {
+        Upstream {
+            addr: UpstreamAddr::SocketAddr(addr),
+            proxy_protocol: false,
+        }
+    }
+}
+
 impl Upstream {
+    /// Set proxy protocol to use.
+    pub(crate) fn set_proxy_protocol(mut self, proxy_protocol: bool) -> Self {
+        self.proxy_protocol = proxy_protocol;
+        self
+    }
+
     /// Connect to upstream.
     pub(crate) async fn connect(&self) -> Result<RelayConn> {
-        match self {
-            Self::SocketAddr(addr) => {
-                let stream = TcpStream::connect(addr)
+        match &self.addr {
+            UpstreamAddr::SocketAddr(addr) => {
+                let dest = TcpStream::connect(addr)
                     .await
                     .context("Connect upstream error")?;
-                Ok(RelayConn::Tcp(stream))
+                Ok(RelayConn::Tcp {
+                    dest,
+                    proxy_protocol: self.proxy_protocol,
+                })
             }
             #[cfg(unix)]
-            Self::Unix(path) => {
-                let stream = UnixStream::connect(path)
+            UpstreamAddr::Unix(path) => {
+                let dest = UnixStream::connect(path)
                     .await
                     .context("Connect upstream error")?;
-                Ok(RelayConn::Unix(stream))
+                Ok(RelayConn::Unix {
+                    dest,
+                    proxy_protocol: self.proxy_protocol,
+                })
             }
         }
         .map(RelayConn::apply_socket_conf)
     }
 
     /// Parse string to [Upstream], for [clap].
-    pub(crate) fn parse(s: &str) -> Result<Self> {
+    pub(crate) fn parse(arg: &str) -> Result<Self> {
+        let (proxy_protocol, addr_string) = arg
+            .split_once('@')
+            .map(|(proxy_protocol, addr)| (proxy_protocol == "PROXY_PROTOCOL_V2", addr))
+            .unwrap_or((false, arg));
+
         #[allow(unused_variables, reason = "cfg")]
-        if let Some(unix_path) = s.strip_prefix("unix:") {
+        if let Some(unix_path) = addr_string.strip_prefix("unix:") {
             #[cfg(unix)]
-            return Ok(Upstream::Unix(unix_path.to_string()));
+            return Ok(Upstream {
+                addr: UpstreamAddr::Unix(unix_path.to_string()),
+                proxy_protocol,
+            });
             #[cfg(not(unix))]
             bail!("Unix socket path is not supported on this platform");
         } else {
-            s.parse()
-                .map(Upstream::SocketAddr)
-                .context("Invalid socket addr")
+            Ok(Upstream {
+                addr: addr_string
+                    .parse()
+                    .map(UpstreamAddr::SocketAddr)
+                    .context("Invalid socket addr")?,
+                proxy_protocol,
+            })
         }
-    }
-
-    pub(crate) fn parse_with_delimiter(s: &str) -> Result<(Arc<str>, Self)> {
-        let (sni, upstream) = s
-            .split_once(':')
-            .context("Invalid upstream delimiter, see help for more details")?;
-
-        Ok((sni.into(), Upstream::parse(upstream)?))
     }
 }
 
 impl fmt::Display for Upstream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SocketAddr(addr) => write!(f, "{}", addr),
+        if self.proxy_protocol {
+            write!(f, "PROXY_PROTOCOL_V2@")?;
+        }
+        match &self.addr {
+            UpstreamAddr::SocketAddr(addr) => write!(f, "{}", addr),
             #[cfg(unix)]
-            Self::Unix(path) => write!(f, "unix:{}", path),
+            UpstreamAddr::Unix(path) => write!(f, "unix:{}", path),
         }
     }
 }
 
-impl serde::Serialize for Upstream {
+impl serde::Serialize for UpstreamAddr {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         match self {
-            Upstream::SocketAddr(addr) => addr.to_string().serialize(serializer),
+            UpstreamAddr::SocketAddr(addr) => addr.to_string().serialize(serializer),
             #[cfg(unix)]
-            Upstream::Unix(path) => format!("unix:{}", path).serialize(serializer),
+            UpstreamAddr::Unix(path) => format!("unix:{}", path).serialize(serializer),
         }
     }
 }
 
-impl<'de> serde::Deserialize<'de> for Upstream {
+impl<'de> serde::Deserialize<'de> for UpstreamAddr {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -175,18 +215,47 @@ impl<'de> serde::Deserialize<'de> for Upstream {
         #[allow(unused_variables, reason = "cfg")]
         if let Some(unix_path) = string.strip_prefix("unix:") {
             #[cfg(unix)]
-            return Ok(Upstream::Unix(unix_path.to_string()));
+            return Ok(UpstreamAddr::Unix(unix_path.to_string()));
             #[cfg(not(unix))]
             return Err(D::Error::custom(
                 "Unix socket path is not supported on this platform",
             ));
         } else {
             match string.parse() {
-                Ok(addr) => Ok(Upstream::SocketAddr(addr)),
+                Ok(addr) => Ok(UpstreamAddr::SocketAddr(addr)),
                 Err(_) => Err(D::Error::custom(format!(
                     "Invalid upstream `{string}`. See help for more details"
                 ))),
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Upstream argument.
+pub(crate) struct UpstreamArg {
+    /// SNI part
+    pub sni: Arc<str>,
+
+    /// Upstream to connect to.
+    pub upstream: Arc<Upstream>,
+}
+
+impl FromStr for UpstreamArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (sni, upstream) = s
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("Invalid upstream argument"))?;
+
+        if sni.is_empty() {
+            bail!("SNI cannot be empty");
+        }
+
+        Ok(UpstreamArg {
+            sni: sni.into(),
+            upstream: Upstream::parse(upstream)?.into(),
+        })
     }
 }

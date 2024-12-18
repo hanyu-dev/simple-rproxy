@@ -1,36 +1,46 @@
 //! Bridge between the client and upstream
 
-use std::{io, sync::atomic::Ordering};
+use std::io;
 
 use anyhow::{Context, Result, anyhow};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
-use crate::{
-    apply_socket_conf, config::USE_PROXY_PROTOCOL, proxy_protocol::encode_proxy_header_v2,
-};
+use crate::{apply_socket_conf, proxy_protocol::encode_proxy_header_v2};
 
 /// Connected to a destination.
 pub(crate) enum RelayConn {
     /// [`TcpStream`]
-    Tcp(TcpStream),
+    Tcp {
+        /// Destination stream
+        dest: TcpStream,
+
+        /// If set, will connect upstream with PROXY protocol.
+        proxy_protocol: bool,
+    },
 
     #[cfg(unix)]
     /// [`UnixStream`]
-    Unix(UnixStream),
+    Unix {
+        /// Destination stream
+        dest: UnixStream,
+
+        /// If set, will connect upstream with PROXY protocol.
+        proxy_protocol: bool,
+    },
 }
 
 impl RelayConn {
     #[inline]
     pub(crate) fn apply_socket_conf(self) -> Self {
         match &self {
-            Self::Tcp(dest_stream) => {
-                apply_socket_conf!(dest_stream);
+            Self::Tcp { dest, .. } => {
+                apply_socket_conf!(dest);
             }
             #[cfg(unix)]
-            Self::Unix(dest_stream) => {
-                apply_socket_conf!(dest_stream);
+            Self::Unix { dest, .. } => {
+                apply_socket_conf!(dest);
             }
         }
 
@@ -42,8 +52,8 @@ impl RelayConn {
     /// Perform IO relay between the client and the destination.
     pub async fn relay_io(self, mut incoming: TcpStream) -> Result<()> {
         macro_rules! do_relay_io {
-            ($incoming:expr_2021, $dest_stream:expr_2021) => {{
-                if USE_PROXY_PROTOCOL.load(Ordering::Relaxed) {
+            ($incoming:expr_2021, $dest_stream:expr_2021, $proxy_protocol:expr) => {{
+                if $proxy_protocol {
                     let (len, buf) =
                         encode_proxy_header_v2($incoming.peer_addr()?, $incoming.local_addr()?)
                             .expect("Socket address, addr family match");
@@ -93,9 +103,15 @@ impl RelayConn {
         }
 
         match self {
-            Self::Tcp(mut dest_stream) => do_relay_io!(incoming, dest_stream),
+            Self::Tcp {
+                mut dest,
+                proxy_protocol,
+            } => do_relay_io!(incoming, dest, proxy_protocol),
             #[cfg(unix)]
-            Self::Unix(mut dest_stream) => do_relay_io!(incoming, dest_stream),
+            Self::Unix {
+                mut dest,
+                proxy_protocol,
+            } => do_relay_io!(incoming, dest, proxy_protocol),
         }
     }
 }
