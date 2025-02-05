@@ -52,7 +52,7 @@ impl RelayConn {
     /// Perform IO relay between the client and the destination.
     pub async fn relay_io(self, mut incoming: TcpStream) -> Result<()> {
         macro_rules! do_relay_io {
-            ($incoming:expr_2021, $dest_stream:expr_2021, $proxy_protocol:expr) => {{
+            ($incoming:expr, $dest_stream:expr, $proxy_protocol:expr) => {{
                 if $proxy_protocol {
                     let (len, buf) =
                         encode_proxy_header_v2($incoming.peer_addr()?, $incoming.local_addr()?)

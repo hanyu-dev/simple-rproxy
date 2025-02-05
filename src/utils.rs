@@ -74,7 +74,7 @@ pub(crate) fn create_listener() -> io::Result<TcpListener> {
 /// - [socket2::SockRef::set_nonblocking](socket2::SockRef::set_nonblocking):
 ///   true
 macro_rules! apply_socket_conf {
-    ($socket:expr_2021) => {{
+    ($socket:expr) => {{
         let sock_ref = socket2::SockRef::from($socket);
 
         #[cfg(unix)]

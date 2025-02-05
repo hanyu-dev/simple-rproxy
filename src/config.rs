@@ -34,7 +34,7 @@ pub(crate) static TARGET_UPSTREAMS: LazyLock<UpstreamMap> = LazyLock::new(Upstre
 pub(crate) static CONFIG: ArcSwapOption<Config> = ArcSwapOption::const_empty();
 
 /// Config version
-const CONFIG_VERSION: u8 = 1;
+const CONFIG_VERSION: u8 = 5;
 
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
