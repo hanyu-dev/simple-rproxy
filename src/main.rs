@@ -182,6 +182,8 @@ async fn run() -> Result<()> {
                 break;
             }
         }
+
+        tracing::info!("Current server loop has exited.");
     });
 
     let last = SERVER_HANDLE
