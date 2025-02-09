@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use tokio::net::UnixStream;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
-use crate::{apply_socket_conf, proxy_protocol::encode_proxy_header_v2};
+use crate::{apply_socket_conf, config::ENABLE_ZERO_COPY, proxy_protocol::encode_proxy_header_v2};
 
 /// Connected to a destination.
 pub(crate) enum RelayConn {
@@ -72,23 +72,28 @@ impl RelayConn {
                 };
 
                 #[cfg(unix)]
-                match tokio_splice::zero_copy_bidirectional(&mut $incoming, &mut $dest_stream).await
-                {
-                    Ok((tx, rx)) => {
-                        tracing::debug!(
-                            "Zero-copy bidirectional io closed, tx: {tx} bytes, rx: {rx} bytes"
-                        );
+                if *ENABLE_ZERO_COPY {
+                    match tokio_splice::zero_copy_bidirectional(&mut $incoming, &mut $dest_stream)
+                        .await
+                    {
+                        Ok((tx, rx)) => {
+                            tracing::debug!(
+                                "Zero-copy bidirectional io closed, tx: {tx} bytes, rx: {rx} bytes"
+                            );
 
-                        return Ok(());
+                            return Ok(());
+                        }
+                        Err(e) => match e.kind() {
+                            io::ErrorKind::InvalidInput => {
+                                tracing::warn!("Fallback to copy bidirectional with buffer");
+                            }
+                            _ => {
+                                return Err(
+                                    anyhow!(e).context("`zero_copy_bidirectional` data failed")
+                                );
+                            }
+                        },
                     }
-                    Err(e) => match e.kind() {
-                        io::ErrorKind::InvalidInput => {
-                            tracing::warn!("Fallback to copy bidirectional with buffer");
-                        }
-                        _ => {
-                            return Err(anyhow!(e).context("`zero_copy_bidirectional` data failed"));
-                        }
-                    },
                 }
 
                 tokio::io::copy_bidirectional(&mut $incoming, &mut $dest_stream)

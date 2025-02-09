@@ -54,14 +54,14 @@ impl<'tcp> PeekedTcpStream<'tcp> {
         cursor += 1 + buf[cursor] as usize;
 
         macro_rules! get_bytes {
-            ($len:expr_2021) => {
+            ($len:expr) => {
                 if let Some(bytes) = buf.get(cursor..cursor + $len) {
                     bytes
                 } else {
                     bail!(Error::ClientHello("codec error"));
                 }
             };
-            ($len:expr_2021, THEN: $prefix:ident => $then:block) => {
+            ($len:expr, THEN: $prefix:ident => $then:block) => {
                 if let Some($prefix) = buf.get(cursor..cursor + $len) {
                     cursor += $len;
                     $then
@@ -69,7 +69,7 @@ impl<'tcp> PeekedTcpStream<'tcp> {
                     bail!(Error::ClientHello("codec error"));
                 }
             };
-            ($len:expr_2021, ADD: $prefix:ident => $then:block) => {
+            ($len:expr, ADD: $prefix:ident => $then:block) => {
                 if let Some($prefix) = buf.get(cursor..cursor + $len) {
                     let content_len = $then;
                     cursor += content_len + $len;

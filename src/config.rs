@@ -30,6 +30,12 @@ pub(crate) static DEFAULT_UPSTREAM: ArcSwapOption<Upstream> = ArcSwapOption::con
 /// Global target upstreams map
 pub(crate) static TARGET_UPSTREAMS: LazyLock<UpstreamMap> = LazyLock::new(UpstreamMap::default);
 
+/// Set if enable zero-copy
+pub(crate) static ENABLE_ZERO_COPY: LazyLock<bool> = LazyLock::new(|| {
+    let env_str = std::env::var("ENABLE_ZERO_COPY").unwrap_or_default();
+    env_str == "true" || env_str == "1"
+});
+
 /// Global config, which is less frequently used.
 pub(crate) static CONFIG: ArcSwapOption<Config> = ArcSwapOption::const_empty();
 
