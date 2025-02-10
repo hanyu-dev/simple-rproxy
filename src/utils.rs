@@ -62,7 +62,13 @@ pub(crate) fn create_listener() -> io::Result<TcpListener> {
 
     socket.bind(addr)?;
 
-    socket.listen(4096)
+    tracing::info!(
+        "Listener socket initialized, buffer size is r[{}]/w[{}]",
+        socket.recv_buffer_size().unwrap_or_default(),
+        socket.send_buffer_size().unwrap_or_default()
+    );
+
+    socket.listen(65536)
 }
 
 #[macro_export]
@@ -82,6 +88,9 @@ macro_rules! apply_socket_conf {
         let _ = sock_ref.set_tcp_keepalive(&$crate::utils::KEEP_ALIVE_CONF);
         let _ = sock_ref.set_nodelay(true);
         let _ = sock_ref.set_nonblocking(true);
+        if let Some(ip_tos) = *crate::config::ADV_IP_TOS {
+            let _ = sock_ref.set_tos(ip_tos);
+        }
     }};
 }
 

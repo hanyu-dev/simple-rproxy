@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use tokio::net::UnixStream;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
-use crate::{apply_socket_conf, config::ENABLE_ZERO_COPY, proxy_protocol::encode_proxy_header_v2};
+use crate::{apply_socket_conf, config::ADV_ENABLE_ZERO_COPY, proxy_protocol::encode_proxy_header_v2};
 
 /// Connected to a destination.
 pub(crate) enum RelayConn {
@@ -72,7 +72,7 @@ impl RelayConn {
                 };
 
                 #[cfg(unix)]
-                if *ENABLE_ZERO_COPY {
+                if *ADV_ENABLE_ZERO_COPY {
                     match tokio_splice::zero_copy_bidirectional(&mut $incoming, &mut $dest_stream)
                         .await
                     {

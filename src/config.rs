@@ -1,4 +1,5 @@
 use std::{
+    env::var,
     fs,
     net::SocketAddr,
     path::Path,
@@ -30,10 +31,39 @@ pub(crate) static DEFAULT_UPSTREAM: ArcSwapOption<Upstream> = ArcSwapOption::con
 /// Global target upstreams map
 pub(crate) static TARGET_UPSTREAMS: LazyLock<UpstreamMap> = LazyLock::new(UpstreamMap::default);
 
-/// Set if enable zero-copy
-pub(crate) static ENABLE_ZERO_COPY: LazyLock<bool> = LazyLock::new(|| {
-    let env_str = std::env::var("ENABLE_ZERO_COPY").unwrap_or_default();
-    env_str == "true" || env_str == "1"
+/// Set if enable zero-copy, default enable
+pub(crate) static ADV_ENABLE_ZERO_COPY: LazyLock<bool> = LazyLock::new(|| {
+    var("RPROXY_ENABLE_ZERO_COPY")
+        .map(|env_str| {
+            let env_str = env_str.trim();
+
+            if let Some(enable) = env_str.parse::<i32>().ok() {
+                enable == 1
+            } else if let Some(enable) = env_str.parse::<bool>().ok() {
+                enable
+            } else {
+                true
+            }
+        })
+        .unwrap_or(true)
+});
+
+/// Set IP TOS.
+pub(crate) static ADV_IP_TOS: LazyLock<Option<u32>> = LazyLock::new(|| {
+    let env_str = var("RPROXY_IP_TOS").ok()?;
+    let env_str = env_str.trim();
+
+    if let ip_tos @ Some(_) = env_str.parse::<u32>().ok() {
+        ip_tos
+    } else {
+        Some(match env_str {
+            "LOWDELAY" => 0x10,
+            "THROUGHPUT" => 0x08,
+            "RELIABILITY" => 0x04,
+            "MINCOST" => 0x02,
+            _ => return None,
+        })
+    }
 });
 
 /// Global config, which is less frequently used.
