@@ -6,6 +6,6 @@ pub(crate) enum Error {
     #[error("Invalid TLS client hello: {0}")]
     ClientHello(&'static str),
 
-    #[error("Failed to peek TCP stream")]
-    Peek,
+    #[error("Peek SNI Error: {0}")]
+    Peek(&'static str),
 }

@@ -1,10 +1,12 @@
 //! Simple-RProxy
 
 #![feature(let_chains)] // Will be stable in Rust 1.85, Rust Edition 2024
+#![feature(const_vec_string_slice)]
 
 mod config;
 mod error;
 mod peek;
+mod peek_v2;
 mod proxy_protocol;
 mod relay;
 mod utils;
@@ -15,6 +17,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use anyhow::Result;
@@ -74,28 +77,19 @@ async fn run() -> Result<()> {
                 }
             };
 
+            // Instant when new conn is accepted
+            let instant = Instant::now();
+
             tokio::spawn(async move {
                 let root_span = tracing::debug_span!("conn_handler", remote_addr = ?remote_addr);
 
                 async {
                     let relay_conn = {
-                        // SNI is no longer than 256 bytes
-                        let mut buf = [0u8; 256];
-
-                        let sni_name = match peek::PeekedTcpStream::new(&mut incoming)
-                            .peek_sni(&mut buf)
+                        let sni_name = match peek_v2::TcpStreamPeeker::new(&mut incoming)
+                            .peek_sni()
                             .await
                         {
-                            Ok(Some(sni_length)) => {
-                                if sni_length != 0 {
-                                    #[allow(unsafe_code, reason = "Non-UTF-8 is OK")]
-                                    Some(unsafe {
-                                        std::str::from_utf8_unchecked(&buf[..sni_length])
-                                    })
-                                } else {
-                                    None
-                                }
-                            }
+                            Ok(Some(sni_length)) => Some(sni_length),
                             Ok(None) => {
                                 tracing::debug!("Not HTTPS.");
 
@@ -114,7 +108,11 @@ async fn run() -> Result<()> {
 
                         let relay_conn = match sni_name {
                             Some(sni_name) => {
-                                tracing::debug!("SNI found: {sni_name}");
+                                let sni_name = sni_name.as_ref();
+                                tracing::debug!(
+                                    "SNI found: `{sni_name}`, cost {:?}",
+                                    instant.elapsed()
+                                );
 
                                 match config::TARGET_UPSTREAMS.get(sni_name) {
                                     Some(upstream) => {
@@ -136,6 +134,8 @@ async fn run() -> Result<()> {
                                 }
                             }
                             None => {
+                                tracing::debug!("SNI not found, cost {:?}", instant.elapsed());
+
                                 config::DEFAULT_UPSTREAM
                                     .load()
                                     .as_ref()

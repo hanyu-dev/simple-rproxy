@@ -7,6 +7,7 @@ use tokio::net::TcpStream;
 
 use crate::error::Error;
 
+#[allow(dead_code, reason = "testing new peeker")]
 #[derive(Debug)]
 pub(crate) struct PeekedTcpStream<'tcp>(&'tcp mut TcpStream);
 
@@ -26,6 +27,7 @@ impl ops::DerefMut for PeekedTcpStream<'_> {
     }
 }
 
+#[allow(dead_code, reason = "testing new peeker")]
 impl<'tcp> PeekedTcpStream<'tcp> {
     #[inline]
     pub(crate) const fn new(tcp_stream: &'tcp mut TcpStream) -> Self {
@@ -166,6 +168,6 @@ impl<'tcp> PeekedTcpStream<'tcp> {
         self.peek(&mut buf)
             .await
             .map(move |_| buf)
-            .context(Error::Peek)
+            .context(Error::Peek("Peek"))
     }
 }
