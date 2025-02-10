@@ -84,43 +84,52 @@ async fn run() -> Result<()> {
 
                 async {
                     let relay_conn = {
-                        let sni_name =
-                            match peek::TcpStreamPeeker::new(&mut incoming).peek_sni().await {
-                                Ok(Some(sni_length)) => Some(sni_length),
-                                Ok(None) => {
-                                    tracing::debug!("Not HTTPS.");
+                        tracing::debug!(elapsed = ?instant.elapsed(), "Start to peek SNI");
 
-                                    if config::HTTPS_ONLY.load(Ordering::Relaxed) {
-                                        return;
-                                    }
+                        let peeked_sni = match peek::TcpStreamPeeker::new(&mut incoming)
+                            .peek_sni()
+                            .await
+                            .unwrap_or_default()
+                        {
+                            sni_name @ Some(_) => sni_name,
+                            None => {
+                                tracing::debug!("Not HTTPS.");
 
-                                    None
+                                if config::HTTPS_ONLY.load(Ordering::Relaxed) {
+                                    return;
                                 }
-                                Err(e) => {
-                                    tracing::error!("Error when peeking SNI: {e:?}");
 
-                                    None
-                                }
-                            };
+                                None
+                            }
+                        };
 
-                        let relay_conn = match sni_name {
-                            Some(sni_name) => {
-                                let sni_name = sni_name.as_ref();
+                        let relay_conn = match peeked_sni {
+                            Some(peeked_sni) => {
+                                let peeked_sni = peeked_sni.as_ref();
                                 tracing::debug!(
-                                    "SNI found: `{sni_name}`, cost {:?}",
-                                    instant.elapsed()
+                                    peeked_sni,
+                                    elapsed = ?instant.elapsed(),
+                                    "SNI found"
                                 );
 
-                                match config::TARGET_UPSTREAMS.get(sni_name) {
+                                match config::TARGET_UPSTREAMS.get(peeked_sni) {
                                     Some(upstream) => {
                                         tracing::debug!(
-                                            "Upstream [{}] matched for [{sni_name}]",
-                                            upstream.value()
+                                            elapsed = ?instant.elapsed(),
+                                            upstream = ?upstream.value(),
+                                            peeked_sni,
+                                            "Upstream matched"
                                         );
 
                                         upstream.connect().await
                                     }
                                     _ => {
+                                        tracing::debug!(
+                                            elapsed = ?instant.elapsed(),
+                                            peeked_sni,
+                                            "No upstream matched"
+                                        );
+
                                         config::DEFAULT_UPSTREAM
                                             .load()
                                             .as_ref()
@@ -131,7 +140,7 @@ async fn run() -> Result<()> {
                                 }
                             }
                             None => {
-                                tracing::debug!("SNI not found, cost {:?}", instant.elapsed());
+                                tracing::debug!(elapsed = ?instant.elapsed(), "SNI not found");
 
                                 config::DEFAULT_UPSTREAM
                                     .load()
@@ -150,6 +159,8 @@ async fn run() -> Result<()> {
                             }
                         }
                     };
+
+                    tracing::debug!(elapsed = ?instant.elapsed(), "Upstream connected.");
 
                     if let Err(e) = relay_conn.relay_io(incoming).await {
                         match e.downcast_ref::<io::Error>().map(|e| e.kind()) {
