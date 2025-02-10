@@ -6,7 +6,6 @@
 mod config;
 mod error;
 mod peek;
-mod peek_v2;
 mod proxy_protocol;
 mod relay;
 mod utils;
@@ -85,26 +84,24 @@ async fn run() -> Result<()> {
 
                 async {
                     let relay_conn = {
-                        let sni_name = match peek_v2::TcpStreamPeeker::new(&mut incoming)
-                            .peek_sni()
-                            .await
-                        {
-                            Ok(Some(sni_length)) => Some(sni_length),
-                            Ok(None) => {
-                                tracing::debug!("Not HTTPS.");
+                        let sni_name =
+                            match peek::TcpStreamPeeker::new(&mut incoming).peek_sni().await {
+                                Ok(Some(sni_length)) => Some(sni_length),
+                                Ok(None) => {
+                                    tracing::debug!("Not HTTPS.");
 
-                                if config::HTTPS_ONLY.load(Ordering::Relaxed) {
-                                    return;
+                                    if config::HTTPS_ONLY.load(Ordering::Relaxed) {
+                                        return;
+                                    }
+
+                                    None
                                 }
+                                Err(e) => {
+                                    tracing::error!("Error when peeking SNI: {e:?}");
 
-                                None
-                            }
-                            Err(e) => {
-                                tracing::error!("Error when peeking SNI: {e:?}");
-
-                                None
-                            }
-                        };
+                                    None
+                                }
+                            };
 
                         let relay_conn = match sni_name {
                             Some(sni_name) => {

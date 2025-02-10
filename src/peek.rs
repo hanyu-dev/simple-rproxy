@@ -1,173 +1,225 @@
-//! `TcpStream` with peek.
+//! TLS `ClientHello` peeker
+//!
+//! - [*] TCP
+//! - [ ] UDP(QUIC)
 
-use std::ops;
+mod utils;
+
+use std::{cmp::min, hint::unreachable_unchecked, pin::Pin};
 
 use anyhow::{Context, Result, bail};
+use rustls::{
+    CipherSuite, InvalidMessage, ProtocolVersion,
+    internal::msgs::{codec::Codec, enums::Compression, handshake},
+};
 use tokio::net::TcpStream;
 
 use crate::error::Error;
 
-#[allow(dead_code, reason = "testing new peeker")]
 #[derive(Debug)]
-pub(crate) struct PeekedTcpStream<'tcp>(&'tcp mut TcpStream);
+pub(crate) struct TcpStreamPeeker<'tcp> {
+    inner: &'tcp mut TcpStream,
 
-impl ops::Deref for PeekedTcpStream<'_> {
-    type Target = TcpStream;
+    // buffer for peeking
+    buffer: utils::ReaderExt,
 
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
+    // stats
+    /// Bytes that we have peeked.
+    bytes_has_been_peeked: usize,
+    /// Maximum bytes that we may peek.
+    bytes_in_total: usize,
 }
 
-impl ops::DerefMut for PeekedTcpStream<'_> {
+impl<'tcp> TcpStreamPeeker<'tcp> {
     #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0
-    }
-}
-
-#[allow(dead_code, reason = "testing new peeker")]
-impl<'tcp> PeekedTcpStream<'tcp> {
-    #[inline]
-    pub(crate) const fn new(tcp_stream: &'tcp mut TcpStream) -> Self {
-        Self(tcp_stream)
+    /// Create a new [`TcpStreamPeeker`];
+    pub(crate) const fn new(inner: &'tcp mut TcpStream) -> Self {
+        Self {
+            inner,
+            buffer: utils::ReaderExt::new(),
+            bytes_has_been_peeked: 0,
+            bytes_in_total: 0,
+        }
     }
 
     #[inline]
+    #[tracing::instrument(level = "debug", skip_all, err)]
+    /// Peeking more.
+    ///
+    /// If `reset_reader`, the new reader's cursor will be set to the last one,
+    /// or the current one.
+    async fn peeking_more(self: Pin<&mut Self>, is_retry: bool) -> Result<()> {
+        let this = self.get_mut();
+
+        // check if we have peeked enough data
+        if this.bytes_has_been_peeked >= this.bytes_in_total {
+            bail!(Error::Peek("No more possible data"))
+        }
+
+        let buffer = {
+            let target_len = min(this.bytes_has_been_peeked + 256, this.bytes_in_total);
+            this.buffer.as_mut_slice(target_len)
+        };
+
+        // peek data
+        let peeked = this
+            .inner
+            .peek(buffer)
+            .await
+            .context(Error::Peek("No more possible data"))?;
+
+        // set data that has peeked.
+        {
+            if this.bytes_has_been_peeked == peeked {
+                bail!(Error::Peek("No more data peeked?"))
+            } else {
+                this.bytes_has_been_peeked = peeked;
+                this.buffer.update_buffer(peeked, is_retry);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    #[tracing::instrument(level = "debug")]
+    /// Try recover from parsing error.
+    ///
+    /// If no error is returned, just retry and the reader's cursor has been
+    /// reset to the last one.
+    async fn try_recover_from_parsing_error(
+        self: Pin<&mut Self>,
+        field_name: &'static str,
+        error: InvalidMessage,
+    ) -> Result<()> {
+        match &error {
+            InvalidMessage::MessageTooShort | InvalidMessage::MissingData(_) => {
+                tracing::trace!("Insufficient data, try peeking more");
+
+                self.peeking_more(true).await
+            }
+            _ => {
+                tracing::error!("Unrecoverable error");
+
+                Err(Error::ClientHello("invalid packet").into())
+            }
+        }
+    }
+
+    async fn read<T>(mut self: Pin<&mut Self>, field_name: &'static str) -> Result<T>
+    where
+        T: for<'a> Codec<'a>,
+    {
+        match T::read(self.buffer.reader()) {
+            Ok(data) => Ok(data),
+            Err(e) => {
+                self.as_mut()
+                    .try_recover_from_parsing_error(field_name, e)
+                    .await?;
+
+                Box::pin(self.read(field_name)).await
+            }
+        }
+    }
+
+    #[inline]
+    #[tracing::instrument(level = "debug", skip(self), err)]
     /// Peek the inner TCP stream (maybe TLS stream), write SNI to given buffer
-    /// and return the peeked SNI' length.
-    pub(crate) async fn peek_sni(mut self, sni_buf: &mut [u8; 256]) -> Result<Option<usize>> {
-        if self.peek_slice::<1>().await?[0] != 0x16 {
+    /// and return the peeked SNI.
+    pub(crate) async fn peek_sni(mut self) -> Result<Option<impl AsRef<str>>> {
+        // content type (1 byte) + version (2 bytes) + length (2 bytes) + handshake type
+        // (1 byte) + length (3 bytes)
+        let mut first_9_bytes_buffer = [0u8; 9];
+        self.inner
+            .peek(&mut first_9_bytes_buffer)
+            .await
+            .context(Error::Peek("no first 9 bytes"))?;
+
+        if first_9_bytes_buffer[0] != 0x16 {
             return Ok(None);
         }
 
-        // ! The typical size of TLS client hello is 252 bytes.
-        // !
-        // ! However, X25519Kyber768Draft00 relies on the TLS key_share extension,
-        // ! causing the size of the TLS Client Hello sent during the TLS
-        // ! handshake with the built-in TLS implementation of Go 1.23 to increase
-        // ! from the typical 252 bytes to 1476 bytes.
-        let buf = self.peek_slice::<256>().await?;
-
-        let mut cursor = 43usize;
-
-        // Session ID
-        cursor += 1 + buf[cursor] as usize;
-
-        macro_rules! get_bytes {
-            ($len:expr) => {
-                if let Some(bytes) = buf.get(cursor..cursor + $len) {
-                    bytes
-                } else {
-                    bail!(Error::ClientHello("codec error"));
-                }
-            };
-            ($len:expr, THEN: $prefix:ident => $then:block) => {
-                if let Some($prefix) = buf.get(cursor..cursor + $len) {
-                    cursor += $len;
-                    $then
-                } else {
-                    bail!(Error::ClientHello("codec error"));
-                }
-            };
-            ($len:expr, ADD: $prefix:ident => $then:block) => {
-                if let Some($prefix) = buf.get(cursor..cursor + $len) {
-                    let content_len = $then;
-                    cursor += content_len + $len;
-                    content_len
-                } else {
-                    bail!(Error::ClientHello("codec error"));
-                }
-            };
+        if first_9_bytes_buffer[5] != 0x01 {
+            bail!(Error::Peek("invalid handshake packet: not ClientHello"))
         }
 
-        // Cipher Suites
-        get_bytes!(2, ADD: cipher_suites_prefix => {
-            u16::from_be_bytes([cipher_suites_prefix[0], cipher_suites_prefix[1]]) as usize
-        });
+        // version (1 byte) + random (32 bytes) + session id (dynamic, 1 + 32 bytes
+        // usually) + cipher suites (dynamic, 1 + 64 bytes usually?) + compression (1 +
+        // 1 bytes) + extensions (1 + 1024 bytes?)
+        let leftover_bytes_length = u32::from_be_bytes([
+            0,
+            first_9_bytes_buffer[6],
+            first_9_bytes_buffer[7],
+            first_9_bytes_buffer[8],
+        ]) as usize;
 
-        // Compression Methods
-        get_bytes!(2, ADD: compression_methods_prefix => {
-            if compression_methods_prefix != [0x01, 0x00] {
-                tracing::debug!(
-                    "Compression method is not null but {:?}",
-                    &buf[cursor..cursor + 1]
-                );
-                bail!(Error::ClientHello("compression method is not null"));
-            }
-            0
-        });
+        #[allow(unsafe_code, reason = "tokio::pin")]
+        let mut this = unsafe { Pin::new_unchecked(&mut self) };
 
-        // Extensions len marker
-        get_bytes!(2, THEN: extensions_len_prefix => {
-            u16::from_be_bytes([extensions_len_prefix[0], extensions_len_prefix[1]]) as usize
-        });
+        // init buffer and cursor
+        {
+            this.bytes_has_been_peeked = 9;
+            this.bytes_in_total = leftover_bytes_length + 9;
 
-        let mut retry_count = 0;
+            this.as_mut().peeking_more(false).await?;
 
-        loop {
-            let buf = match retry_count {
-                0 => &buf,
-                1 => &self.peek_slice::<1536>().await?[..],
-                2 => &self.peek_slice::<2048>().await?[..],
-                3 => &self.peek_slice::<3072>().await?[..],
-                4 => &self.peek_slice::<4096>().await?[..],
-                _ => bail!(Error::ClientHello("too long")),
-            };
+            this.buffer
+                .set_cursor(9)
+                .expect("must have over 9 bytes peeked");
+        }
 
-            let mut sni_length = None;
+        macro_rules! read {
+            ($ty:ty) => {{ this.as_mut().read::<$ty>(stringify!($ty)).await? }};
+        }
 
-            while sni_length.is_none()
-                && let Some(extension_prefix) = buf.get(cursor..cursor + 4)
-            {
-                let extension_length =
-                    u16::from_be_bytes([extension_prefix[2], extension_prefix[3]]) as usize;
+        let _ = read!(ProtocolVersion);
+        let _ = read!(handshake::Random);
+        let _ = read!(handshake::SessionId);
+        let _ = read!(Vec::<CipherSuite>);
 
-                if extension_prefix[0..2] == [0x00, 0x00] {
-                    tracing::debug!("Ext `server_name` found at byte cursor {cursor}.");
+        let compressions = read!(Vec::<Compression>);
+        if compressions.first() != Some(&Compression::Null) {
+            tracing::error!("Invalid compressions: {compressions:x?}");
+            bail!(Error::ClientHello("invalid compression"));
+        }
 
-                    // ! | Server name | bytes of "server name" extension data follows |
-                    // ! | 00 00       | XX XX                                         |
-                    // ! | bytes of first list entry follows | list entry type |
-                    // ! | XX XX                             | 00              |
-                    // ! | bytes of hostname follows |
-                    // ! | XX XX                     |
-                    cursor += 7;
+        // read extensions
+        let _len = read!(u16);
+        while this.as_mut().buffer.reader().any_left() {
+            let extension = read!(handshake::ClientExtension);
+            tracing::trace!("Found extension: {:?}", extension.ext_type());
+            // Avoid clone here? Emmm troublesome.
+            if let handshake::ClientExtension::ServerName(mut server_names) = extension {
+                let idx = server_names
+                    .iter()
+                    .position(|server_name| {
+                        matches!(
+                            server_name.get_payload(),
+                            handshake::ServerNamePayload::HostName(_)
+                        )
+                    })
+                    .ok_or_else(|| {
+                        tracing::error!(
+                            "Invalid SNI extension though SNI extension found: {server_names:#?}"
+                        );
 
-                    sni_length = get_bytes!(2, THEN: hostname_prefix => {
-                        Some(u16::from_be_bytes([hostname_prefix[0], hostname_prefix[1]]) as usize)
-                    });
+                        Error::ClientHello("Invalid SNI extension")
+                    })?;
 
-                    break;
-                }
-
-                cursor += 4;
-                cursor += extension_length;
-            }
-
-            if let Some(sni_length) = sni_length {
-                sni_buf
-                    .get_mut(..sni_length)
-                    .context(Error::ClientHello("SNI too long"))?
-                    .copy_from_slice(&buf[cursor..cursor + sni_length]);
-
-                return Ok(Some(sni_length));
-            } else {
-                tracing::warn!("SNI not found, try peeking more...");
-
-                retry_count += 1;
+                // `swap_remove` is O(1) operation
+                return match server_names.swap_remove(idx).into_payload() {
+                    handshake::ServerNamePayload::HostName(host_name) => Ok(Some(host_name)),
+                    _ => {
+                        #[allow(unsafe_code, reason = "have checked the item located at the idx")]
+                        unsafe {
+                            unreachable_unchecked()
+                        }
+                    }
+                };
             }
         }
-    }
 
-    #[inline(always)]
-    async fn peek_slice<const BUF_LEN: usize>(&mut self) -> Result<[u8; BUF_LEN]> {
-        let mut buf = [0u8; BUF_LEN];
-
-        self.peek(&mut buf)
-            .await
-            .map(move |_| buf)
-            .context(Error::Peek("Peek"))
+        // tracing::warn!("No SNI extension found!");
+        Ok(None)
     }
 }
