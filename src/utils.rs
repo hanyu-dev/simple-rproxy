@@ -31,6 +31,9 @@ pub(crate) fn init_tracing() {
         EnvFilter, Layer, filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt,
     };
 
+    #[cfg(feature = "feat-tokio-debug")]
+    let console_layer = console_subscriber::spawn();
+
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_timer(ChronoLocal::rfc_3339())
         .with_filter(
@@ -38,6 +41,11 @@ pub(crate) fn init_tracing() {
                 .with_default_directive(LevelFilter::DEBUG.into())
                 .from_env_lossy(),
         );
+
+    #[cfg(feature = "feat-tokio-debug")]
+    tracing_subscriber::registry().with(console_layer).with(fmt_layer).init();
+
+    #[cfg(not(feature = "feat-tokio-debug"))]
     tracing_subscriber::registry().with(fmt_layer).init();
 }
 

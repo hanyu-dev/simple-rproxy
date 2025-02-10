@@ -12,6 +12,7 @@ mod utils;
 
 use std::{
     io,
+    net::SocketAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -21,8 +22,7 @@ use std::{
 
 use anyhow::Result;
 use mimalloc::MiMalloc;
-use tokio::task::JoinHandle;
-use tracing::Instrument;
+use tokio::{net::TcpStream, task::JoinHandle};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -64,7 +64,7 @@ async fn run() -> Result<()> {
     let canceller_rx = canceller_tx.clone();
     let handler = tokio::spawn(async move {
         loop {
-            let (mut incoming, remote_addr) = match listener.accept().await {
+            let (incoming, remote_addr) = match listener.accept().await {
                 Ok(accepted) => accepted,
                 Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => {
                     tracing::debug!("Connection aborted.");
@@ -79,112 +79,7 @@ async fn run() -> Result<()> {
             // Instant when new conn is accepted
             let instant = Instant::now();
 
-            tokio::spawn(async move {
-                let root_span = tracing::debug_span!("conn_handler", remote_addr = ?remote_addr);
-
-                async {
-                    let relay_conn = {
-                        tracing::debug!(elapsed = ?instant.elapsed(), "Start to peek SNI");
-
-                        let peeked_sni = match peek::TcpStreamPeeker::new(&mut incoming)
-                            .peek_sni()
-                            .await
-                            .unwrap_or_default()
-                        {
-                            sni_name @ Some(_) => sni_name,
-                            None => {
-                                tracing::debug!("Not HTTPS.");
-
-                                if config::HTTPS_ONLY.load(Ordering::Relaxed) {
-                                    return;
-                                }
-
-                                None
-                            }
-                        };
-
-                        let relay_conn = match peeked_sni {
-                            Some(peeked_sni) => {
-                                let peeked_sni = peeked_sni.as_ref();
-                                tracing::debug!(
-                                    peeked_sni,
-                                    elapsed = ?instant.elapsed(),
-                                    "SNI found"
-                                );
-
-                                match config::TARGET_UPSTREAMS.get(peeked_sni) {
-                                    Some(upstream) => {
-                                        tracing::debug!(
-                                            elapsed = ?instant.elapsed(),
-                                            upstream = ?upstream.value(),
-                                            peeked_sni,
-                                            "Upstream matched"
-                                        );
-
-                                        upstream.connect().await
-                                    }
-                                    _ => {
-                                        tracing::debug!(
-                                            elapsed = ?instant.elapsed(),
-                                            peeked_sni,
-                                            "No upstream matched"
-                                        );
-
-                                        config::DEFAULT_UPSTREAM
-                                            .load()
-                                            .as_ref()
-                                            .unwrap()
-                                            .connect()
-                                            .await
-                                    }
-                                }
-                            }
-                            None => {
-                                tracing::debug!(elapsed = ?instant.elapsed(), "SNI not found");
-
-                                config::DEFAULT_UPSTREAM
-                                    .load()
-                                    .as_ref()
-                                    .unwrap()
-                                    .connect()
-                                    .await
-                            }
-                        };
-
-                        match relay_conn {
-                            Ok(relay_conn) => relay_conn,
-                            Err(e) => {
-                                tracing::error!("Failed to connect to upstream: {e:?}",);
-                                return;
-                            }
-                        }
-                    };
-
-                    tracing::debug!(elapsed = ?instant.elapsed(), "Upstream connected.");
-
-                    if let Err(e) = relay_conn.relay_io(incoming).await {
-                        match e.downcast_ref::<io::Error>().map(|e| e.kind()) {
-                            Some(io::ErrorKind::BrokenPipe) => {
-                                // Some poor implemented client will do so.
-                                tracing::debug!("Connection closed unexpectedly");
-
-                                return;
-                            }
-                            Some(io::ErrorKind::ConnectionReset) => {
-                                // Some poor implemented client will do so.
-                                tracing::debug!("Connection reset by peer");
-
-                                return;
-                            }
-                            _ => {}
-                        }
-
-                        tracing::error!("Unexpected error: {e:#?}");
-                    }
-                }
-                .instrument(root_span)
-                .await;
-            });
+            tokio::spawn(conn_handler(incoming, remote_addr, instant));
 
             if canceller_rx.load(Ordering::Relaxed) {
                 break;
@@ -206,6 +101,108 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[tracing::instrument(level = "debug", skip(incoming, instant))]
+async fn conn_handler(mut incoming: TcpStream, remote_addr: SocketAddr, instant: Instant) {
+    let relay_conn = {
+        tracing::debug!(elapsed = ?instant.elapsed(), "Start to peek SNI");
+
+        let peeked_sni = match peek::TcpStreamPeeker::new(&mut incoming)
+            .peek_sni()
+            .await
+            .unwrap_or_default()
+        {
+            sni_name @ Some(_) => sni_name,
+            None => {
+                tracing::debug!("Not HTTPS.");
+
+                if config::HTTPS_ONLY.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                None
+            }
+        };
+
+        let relay_conn = match peeked_sni {
+            Some(peeked_sni) => {
+                let peeked_sni = peeked_sni.as_ref();
+                tracing::debug!(
+                    peeked_sni,
+                    elapsed = ?instant.elapsed(),
+                    "SNI found"
+                );
+
+                match config::TARGET_UPSTREAMS.get(peeked_sni) {
+                    Some(upstream) => {
+                        tracing::debug!(
+                            elapsed = ?instant.elapsed(),
+                            upstream = ?upstream.value(),
+                            peeked_sni,
+                            "Upstream matched"
+                        );
+
+                        upstream.connect().await
+                    }
+                    _ => {
+                        tracing::debug!(
+                            elapsed = ?instant.elapsed(),
+                            peeked_sni,
+                            "No upstream matched"
+                        );
+
+                        config::DEFAULT_UPSTREAM
+                            .load()
+                            .as_ref()
+                            .unwrap()
+                            .connect()
+                            .await
+                    }
+                }
+            }
+            None => {
+                tracing::debug!(elapsed = ?instant.elapsed(), "SNI not found");
+
+                config::DEFAULT_UPSTREAM
+                    .load()
+                    .as_ref()
+                    .unwrap()
+                    .connect()
+                    .await
+            }
+        };
+
+        match relay_conn {
+            Ok(relay_conn) => relay_conn,
+            Err(e) => {
+                tracing::error!("Failed to connect to upstream: {e:?}",);
+                return;
+            }
+        }
+    };
+
+    tracing::debug!(elapsed = ?instant.elapsed(), "Upstream connected.");
+
+    if let Err(e) = relay_conn.relay_io(incoming).await {
+        match e.downcast_ref::<io::Error>().map(|e| e.kind()) {
+            Some(io::ErrorKind::BrokenPipe) => {
+                // Some poor implemented client will do so.
+                tracing::debug!("Connection closed unexpectedly");
+
+                return;
+            }
+            Some(io::ErrorKind::ConnectionReset) => {
+                // Some poor implemented client will do so.
+                tracing::debug!("Connection reset by peer");
+
+                return;
+            }
+            _ => {}
+        }
+
+        tracing::error!("Unexpected error: {e:#?}");
+    }
 }
 
 #[cfg(unix)]

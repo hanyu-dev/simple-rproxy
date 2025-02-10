@@ -9,6 +9,7 @@ rust-version = "1.85.0"
 anyhow = "1.0.95"
 arc-swap = "1.7.1"
 clap = { version = "4.5.28", features = ["derive"] }
+console-subscriber = { version = "0.4.1", features = ["parking_lot"], optional = true }
 const_for = "0.1.5"
 dashmap = { version = "6.1.0", features = ["inline", "serde"] }
 foldhash = "0.1.4"
@@ -41,6 +42,9 @@ tokio-splice = "0.2.1"
 [build-dependencies]
 anyhow = "1.0.95"
 chrono = "0.4.39"
+
+[features]
+feat-tokio-debug = ["dep:console-subscriber"]
 
 [profile.release]
 opt-level = 3
