@@ -344,7 +344,7 @@ impl Cli {
         tracing::info!("New config to be loaded: {config:#?}");
 
         let new_listen = config.listen;
-        let old_config = CONFIG.swap(Some(config.into()));
+        let old_config = config.apply_global_config();
 
         #[allow(unsafe_code, reason = "Have checked old_config is not None")]
         Ok(unsafe { old_config.unwrap_unchecked().listen != new_listen })
