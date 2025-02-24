@@ -111,9 +111,9 @@ pub(crate) struct Config {
 
 impl Config {
     /// Apply global config, return old config.
-    fn apply_global_config(self) -> Option<Arc<Self>> {
+    fn apply_global_config(self, _is_reload: bool) -> Option<Arc<Self>> {
         #[cfg(unix)]
-        {
+        if !_is_reload {
             use crate::utils::PidFile;
 
             if let Some(pid_file) =
@@ -286,7 +286,7 @@ impl Cli {
                     );
                 }
 
-                config.apply_global_config();
+                config.apply_global_config(false);
             }
             _ => {
                 tracing::info!("No config file found, use CLI args to init config.");
@@ -328,7 +328,7 @@ impl Cli {
                 };
 
                 tracing::info!("Config loaded from CLI args: {config:#?}");
-                config.apply_global_config();
+                config.apply_global_config(false);
             }
         }
 
@@ -344,7 +344,7 @@ impl Cli {
         tracing::info!("New config to be loaded: {config:#?}");
 
         let new_listen = config.listen;
-        let old_config = config.apply_global_config();
+        let old_config = config.apply_global_config(true);
 
         #[allow(unsafe_code, reason = "Have checked old_config is not None")]
         Ok(unsafe { old_config.unwrap_unchecked().listen != new_listen })
