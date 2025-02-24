@@ -1,6 +1,5 @@
 //! Simple-RProxy
 
-#![feature(let_chains)] // Will be stable in Rust 1.85, Rust Edition 2024
 #![feature(const_vec_string_slice)]
 
 mod config;
