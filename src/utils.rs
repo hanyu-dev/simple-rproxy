@@ -1,3 +1,7 @@
+//! Utilities
+
+pub(crate) mod proxy_protocol;
+
 use std::{
     fmt, io,
     net::SocketAddr,
@@ -43,7 +47,10 @@ pub(crate) fn init_tracing() {
         );
 
     #[cfg(feature = "feat-tokio-debug")]
-    tracing_subscriber::registry().with(console_layer).with(fmt_layer).init();
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(fmt_layer)
+        .init();
 
     #[cfg(not(feature = "feat-tokio-debug"))]
     tracing_subscriber::registry().with(fmt_layer).init();
@@ -96,7 +103,7 @@ macro_rules! apply_socket_conf {
         let _ = sock_ref.set_tcp_keepalive(&$crate::utils::KEEP_ALIVE_CONF);
         let _ = sock_ref.set_nodelay(true);
         let _ = sock_ref.set_nonblocking(true);
-        if let Some(ip_tos) = *crate::config::ADV_IP_TOS {
+        if let Some(ip_tos) = *($crate::config::ADV_IP_TOS) {
             let _ = sock_ref.set_tos(ip_tos);
         }
     }};

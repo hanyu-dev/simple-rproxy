@@ -6,17 +6,17 @@ rust-version = "1.85.0"
 
 [dependencies]
 # Basic deps
-anyhow = "1.0.95"
+anyhow = "1.0.96"
 arc-swap = "1.7.1"
-clap = { version = "4.5.28", features = ["derive"] }
+clap = { version = "4.5.30", features = ["derive"] }
 console-subscriber = { version = "0.4.1", features = ["parking_lot"], optional = true }
 const_for = "0.1.5"
 dashmap = { version = "6.1.0", features = ["inline", "serde"] }
 foldhash = "0.1.4"
 mimalloc = "0.1.43"
-rustls = { version = "=0.23.22", default-features = false, features = ["std"] }
-serde = { version = "1.0.217", features = ["derive", "rc"] }
-serde_json = "1.0.138"
+rustls = { version = "=0.23.23", default-features = false, features = ["std"] }
+serde = { version = "1.0.218", features = ["derive", "rc"] }
+serde_json = "1.0.139"
 socket2 = { version = "0.5.8", features = ["all"] }
 thiserror = "2.0.11"
 tokio = { version = "1.43.0", features = [
@@ -40,7 +40,7 @@ rustls = { git = "https://github.com/cxw620/rustls.git", branch = "expose-ext" }
 tokio-splice = "0.2.1"
 
 [build-dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.96"
 chrono = "0.4.39"
 
 [features]

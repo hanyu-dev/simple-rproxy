@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use tokio::net::UnixStream;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
-use crate::{apply_socket_conf, config::ADV_ENABLE_ZERO_COPY, proxy_protocol::encode_proxy_header_v2};
+use crate::{apply_socket_conf, config::ADV_ENABLE_ZERO_COPY, utils::proxy_protocol::encode_v2};
 
 /// Connected to a destination.
 pub(crate) enum RelayConn {
@@ -54,9 +54,8 @@ impl RelayConn {
         macro_rules! do_relay_io {
             ($incoming:expr, $dest_stream:expr, $proxy_protocol:expr) => {{
                 if $proxy_protocol {
-                    let (len, buf) =
-                        encode_proxy_header_v2($incoming.peer_addr()?, $incoming.local_addr()?)
-                            .expect("Socket address, addr family match");
+                    let (len, buf) = encode_v2($incoming.peer_addr()?, $incoming.local_addr()?)
+                        .expect("Socket address, addr family match");
 
                     $dest_stream
                         .writable()

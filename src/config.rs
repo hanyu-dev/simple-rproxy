@@ -37,9 +37,10 @@ pub(crate) static ADV_ENABLE_ZERO_COPY: LazyLock<bool> = LazyLock::new(|| {
         .map(|env_str| {
             let env_str = env_str.trim();
 
-            if let Some(enable) = env_str.parse::<i32>().ok() {
+            #[allow(clippy::manual_unwrap_or, reason = "may add new branch")]
+            if let Ok(enable) = env_str.parse::<i32>() {
                 enable == 1
-            } else if let Some(enable) = env_str.parse::<bool>().ok() {
+            } else if let Ok(enable) = env_str.parse::<bool>() {
                 enable
             } else {
                 true

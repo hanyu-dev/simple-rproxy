@@ -8,7 +8,7 @@ use const_for::const_for;
 /// Encode PROXY protocol header.
 ///
 /// Currently we only suoport PROXY protocol v2.
-pub(crate) const fn encode_proxy_header_v2(
+pub(crate) const fn encode_v2(
     src: SocketAddr,
     dst: SocketAddr,
 ) -> Option<(usize, [u8; 64])> {
@@ -86,11 +86,11 @@ pub(crate) const fn encode_proxy_header_v2(
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-    use super::encode_proxy_header_v2;
+    use super::encode_v2;
 
     #[test]
     fn test_encode_ipv4() {
-        let (len, buf) = encode_proxy_header_v2(
+        let (len, buf) = encode_v2(
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 1234)),
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 5678)),
         )
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_encode_ipv6() {
-        let (len, buf) = encode_proxy_header_v2(
+        let (len, buf) = encode_v2(
             SocketAddr::V6(SocketAddrV6::new(
                 Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
                 1234,
