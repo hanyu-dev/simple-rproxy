@@ -70,14 +70,31 @@ pub(crate) static ADV_IP_TOS: LazyLock<Option<u32>> = LazyLock::new(|| {
 /// Global config, which is less frequently used.
 pub(crate) static CONFIG: ArcSwapOption<Config> = ArcSwapOption::const_empty();
 
+#[cfg(unix)]
+pub(crate) static PID_FILE: ArcSwapOption<crate::utils::PidFile> = ArcSwapOption::const_empty();
+
 /// Config version
 const CONFIG_VERSION: u8 = 5;
+
+#[cfg(unix)]
+/// Defalt PID file name
+const DEFAULT_PID_FILE: &str = concat!("/dev/shm/", env!("CARGO_PKG_NAME"), "/current.pid");
+
+#[cfg(unix)]
+fn default_pid_file() -> Arc<str> {
+    DEFAULT_PID_FILE.into()
+}
 
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Config {
     /// Version of config file.
     pub version: u8,
+
+    #[cfg(unix)]
+    #[serde(default)]
+    /// PID file, default to be /run/simple-rproxy.pid
+    pub pid_file: Option<Arc<str>>,
 
     /// Local socket addr to bind to, default to be 0.0.0.0:443
     pub listen: SocketAddr,
@@ -95,6 +112,20 @@ pub(crate) struct Config {
 impl Config {
     /// Apply global config, return old config.
     fn apply_global_config(self) -> Option<Arc<Self>> {
+        #[cfg(unix)]
+        {
+            use crate::utils::PidFile;
+
+            if let Some(pid_file) =
+                PidFile::new(self.pid_file.clone().expect("must have pid file set"))
+                    .expect("Create PID file error")
+            {
+                PID_FILE.swap(Some(Arc::new(pid_file)));
+            } else {
+                // no op
+            };
+        }
+
         HTTPS_ONLY.store(self.https_only, Ordering::Relaxed);
 
         DEFAULT_UPSTREAM.store(Some(Arc::clone(&self.default_upstream)));
@@ -146,6 +177,16 @@ pub(crate) struct Cli {
     /// If set, only accept HTTPS connections.
     pub https_only: bool,
 
+    #[cfg(unix)]
+    #[arg(long)]
+    /// PID file name
+    ///
+    ///
+    /// # Notice
+    ///
+    /// Will override the config file's setting.
+    pub pid_file: Option<Arc<str>>,
+
     #[clap(subcommand)]
     /// Subcommand
     subcommand: Option<SubCommand>,
@@ -159,6 +200,14 @@ enum SubCommand {
 
     /// Print version and exit.
     Version,
+
+    #[cfg(unix)]
+    /// Reload
+    Reload {
+        #[arg(short, long)]
+        /// PID to reload, or get from PID file
+        pid: Option<u32>,
+    },
 }
 
 impl Cli {
@@ -183,12 +232,59 @@ impl Cli {
 
                     return Ok(false);
                 }
+                #[cfg(unix)]
+                SubCommand::Reload { pid } => {
+                    use std::process;
+
+                    tracing::info!("Try reload server...");
+
+                    let pid = pid
+                        .or_else(|| {
+                            let file = args
+                                .pid_file
+                                .as_ref()
+                                .map(AsRef::as_ref)
+                                .unwrap_or(DEFAULT_PID_FILE);
+                            fs::read_to_string(file)
+                                .inspect_err(|e| {
+                                    tracing::error!(file, "Read PID file error: {e:?}");
+                                })
+                                .ok()?
+                                .parse()
+                                .inspect_err(|e| {
+                                    tracing::error!(file, "Parse PID file error: {e:?}");
+                                })
+                                .ok()
+                        })
+                        .context("No PID")?;
+
+                    let status = process::Command::new("/bin/kill")
+                        .arg("-HUP")
+                        .arg(pid.to_string())
+                        .stdin(process::Stdio::null())
+                        .stdout(process::Stdio::piped())
+                        .status()?;
+
+                    tracing::info!(pid, "Reload finished, result: {status:?}");
+
+                    return Ok(false);
+                }
             }
         }
 
         match Self::load_config_file()? {
-            Some(config) => {
+            #[cfg_attr(not(unix), allow(unused_mut, reason = "cfg"))]
+            Some(mut config) => {
                 tracing::info!("Config loaded from file: {config:#?}");
+
+                #[cfg(unix)]
+                {
+                    config.pid_file = Some(
+                        args.pid_file
+                            .or(config.pid_file)
+                            .unwrap_or_else(default_pid_file),
+                    );
+                }
 
                 config.apply_global_config();
             }
@@ -200,6 +296,8 @@ impl Cli {
                     default_upstream,
                     upstream,
                     https_only,
+                    #[cfg(unix)]
+                    pid_file,
                     subcommand: _,
                 } = args;
 
@@ -221,6 +319,8 @@ impl Cli {
 
                 let config = Config {
                     version: CONFIG_VERSION,
+                    #[cfg(unix)]
+                    pid_file: Some(pid_file.unwrap_or_else(default_pid_file)),
                     listen,
                     default_upstream,
                     upstream,
@@ -239,16 +339,11 @@ impl Cli {
     ///
     /// If listen addr is changed, return true.
     pub(crate) fn reload_config() -> Result<bool> {
-        let new_listen = {
-            CONFIG
-                .load()
-                .as_ref()
-                .expect("Cannot reload config before init")
-                .listen
-        };
-
         let config = Self::load_config_file()?.context("Cannot reload without config file")?;
 
+        tracing::info!("New config to be loaded: {config:#?}");
+
+        let new_listen = config.listen;
         let old_config = CONFIG.swap(Some(config.into()));
 
         #[allow(unsafe_code, reason = "Have checked old_config is not None")]
@@ -296,6 +391,8 @@ impl Cli {
 
         let config = Config {
             version: CONFIG_VERSION,
+            #[cfg(unix)]
+            pid_file: Some(default_pid_file()),
             listen: SocketAddr::from(([0, 0, 0, 0], 443)),
             default_upstream: Upstream::parse("127.0.0.1:8443").unwrap().into(),
             upstream,

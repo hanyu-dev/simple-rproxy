@@ -49,6 +49,9 @@ async fn main() -> Result<()> {
     // wait for termination signal
     termination_handle().await;
 
+    // after termination
+    termination_post_tasks().await;
+
     Ok(())
 }
 
@@ -264,4 +267,11 @@ async fn termination_handle() {
     }
 
     tracing::info!("signal received, shutdown");
+}
+
+async fn termination_post_tasks() {
+    #[cfg(unix)]
+    {
+        config::PID_FILE.store(None);
+    }
 }

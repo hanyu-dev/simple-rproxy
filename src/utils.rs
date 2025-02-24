@@ -283,3 +283,119 @@ impl FromStr for UpstreamArg {
         })
     }
 }
+
+#[cfg(unix)]
+pub(crate) use unix::*;
+
+#[cfg(unix)]
+mod unix {
+    use std::{
+        fs::{self, File},
+        io::{Read, Write},
+        ops::{Deref, DerefMut},
+        path::Path,
+        process,
+        sync::Arc,
+    };
+
+    use anyhow::{Context, Result, anyhow, bail};
+
+    pub(crate) struct PidFile {
+        path: Arc<str>,
+        instance: File,
+    }
+
+    impl Deref for PidFile {
+        type Target = File;
+
+        fn deref(&self) -> &Self::Target {
+            &self.instance
+        }
+    }
+
+    impl DerefMut for PidFile {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.instance
+        }
+    }
+
+    #[cfg(unix)]
+    impl PidFile {
+        pub(crate) fn new(path: Arc<str>) -> Result<Option<Self>> {
+            let instance = match fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&*path)
+            {
+                Ok(mut instance) => {
+                    if !instance
+                        .try_lock()
+                        .inspect_err(|e| {
+                            tracing::error!(path = &*path, "Locking pid file error: {e:?}");
+                        })
+                        .unwrap_or_default()
+                    {
+                        bail!(
+                            "Locking pid file failed, a different lock is already held on this \
+                             file, maybe there has already been a running instance?"
+                        )
+                    };
+
+                    let mut buf = String::new();
+
+                    let read = instance
+                        .read_to_string(&mut buf)
+                        .context("read PID file error")?;
+
+                    let current_process_id = process::id();
+                    if read != 0 {
+                        if let Ok(pid) = buf.parse::<u32>() {
+                            if pid != process::id() {
+                                tracing::warn!(pid, "Has other instance running?");
+                                if Path::new(&format!("/proc/{pid}/status")).exists() {
+                                    bail!("Has other instance running.")
+                                } else {
+                                    instance
+                                        .set_len(0)
+                                        .context("truncate existing file error")?;
+                                }
+                            } else {
+                                return Ok(None);
+                            }
+                        } else {
+                            bail!("Invalid existing file content: {buf}")
+                        }
+                    } else {
+                        // no op
+                    }
+
+                    instance
+                        .write_all(current_process_id.to_string().as_bytes())
+                        .expect("must success when writting pid file");
+
+                    instance
+                }
+                Err(e) => {
+                    // TODO: which error id OK?
+                    bail!(anyhow!("Read file {path} error").context(e))
+                }
+            };
+
+            Ok(Some(Self { path, instance }))
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for PidFile {
+        fn drop(&mut self) {
+            let _ = self.instance.unlock().inspect_err(|e| {
+                eprintln!("Drop pid file: unlock error: {e:#?}");
+            });
+            let _ = fs::remove_file(&*self.path).inspect_err(|e| {
+                eprintln!("Drop pid file: delete error: {e:#?}");
+            });
+        }
+    }
+}
