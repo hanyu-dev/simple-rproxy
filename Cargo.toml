@@ -1,6 +1,6 @@
 [package]
 name = "simple-rproxy"
-version = "0.6.0-rc.3"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85.0"
 
@@ -8,7 +8,7 @@ rust-version = "1.85.0"
 # Basic deps
 anyhow = "1.0.96"
 arc-swap = "1.7.1"
-clap = { version = "4.5.30", features = ["derive"] }
+clap = { version = "4.5.31", features = ["derive"] }
 console-subscriber = { version = "0.4.1", features = ["parking_lot"], optional = true }
 const_for = "0.1.5"
 dashmap = { version = "6.1.0", features = ["inline", "serde"] }
