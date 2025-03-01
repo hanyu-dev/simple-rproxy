@@ -1,6 +1,6 @@
 [package]
 name = "simple-rproxy"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.85.0"
 
@@ -41,7 +41,7 @@ tokio-splice = "0.2.1"
 
 [build-dependencies]
 anyhow = "1.0.96"
-chrono = "0.4.39"
+chrono = "0.4.40"
 
 [features]
 feat-tokio-debug = ["dep:console-subscriber"]
