@@ -126,7 +126,7 @@ impl<'tcp> TcpStreamPeeker<'tcp> {
     #[tracing::instrument(level = "debug", skip(self), err)]
     /// Peek the inner TCP stream (maybe TLS stream), write SNI to given buffer
     /// and return the peeked SNI.
-    pub(crate) async fn peek_sni(mut self) -> Result<Option<impl AsRef<str>>> {
+    pub(crate) async fn peek_sni(mut self) -> Result<PeekedSni<impl AsRef<str> + use<>>> {
         // content type (1 byte) + version (2 bytes) + length (2 bytes) + handshake type
         // (1 byte) + length (3 bytes)
         let mut first_9_bytes_buffer = [0u8; 9];
@@ -136,7 +136,7 @@ impl<'tcp> TcpStreamPeeker<'tcp> {
             .context(Error::Peek("no first 9 bytes"))?;
 
         if first_9_bytes_buffer[0] != 0x16 {
-            return Ok(None);
+            return Ok(PeekedSni::NotHTTPS);
         }
 
         if first_9_bytes_buffer[5] != 0x01 {
@@ -208,7 +208,7 @@ impl<'tcp> TcpStreamPeeker<'tcp> {
 
                 // `swap_remove` is O(1) operation
                 return match server_names.swap_remove(idx).into_payload() {
-                    handshake::ServerNamePayload::HostName(host_name) => Ok(Some(host_name)),
+                    handshake::ServerNamePayload::HostName(host_name) => Ok(PeekedSni::Some(host_name)),
                     _ => {
                         #[allow(unsafe_code, reason = "have checked the item located at the idx")]
                         unsafe {
@@ -219,7 +219,19 @@ impl<'tcp> TcpStreamPeeker<'tcp> {
             }
         }
 
-        // tracing::warn!("No SNI extension found!");
-        Ok(None)
+        Ok(PeekedSni::None)
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) enum PeekedSni<T> {
+    /// SNI is peeked.
+    Some(T),
+
+    #[default]
+    /// SNI not found.
+    None,
+
+    /// Not HTTPS connection at all.
+    NotHTTPS,
 }

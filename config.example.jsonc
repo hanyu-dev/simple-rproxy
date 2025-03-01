@@ -1,0 +1,30 @@
+{
+  "version": 5,
+  // ! For most circumstance you needn't specify pid_file.
+  // "pid_file": "/dev/shm/simple-rproxy/current.pid",
+  "listen": "0.0.0.0:443",
+  // ! Notice: if `default_upstream` is not set, we will reject HTTPS with TLS alert and drop the connection immediately.
+  // "default_upstream": {
+  //   "addr": "127.0.0.1:8443",
+  //   "proxy_protocol": false
+  // },
+  // ! Notice: renamed, and `upstream` is alias
+  "upstreams": {
+    "example.com": {
+      "addr": "127.0.0.1:8443",
+      "proxy_protocol": false
+    },
+    "unix-path.example.com": {
+      "addr": "unix:/run/nginx/example.sock",
+      "proxy_protocol": false
+    },
+    "example-proxy-protocol-v2.com": {
+      "addr": "127.0.0.1:8443",
+      "proxy_protocol": true
+    },
+    "unix-path.example-proxy-protocol-v2.com": {
+      "addr": "unix:/run/nginx/example.sock",
+      "proxy_protocol": true
+    }
+  }
+}

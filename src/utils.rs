@@ -321,7 +321,8 @@ mod unix {
 
     #[cfg(unix)]
     impl PidFile {
-        pub(crate) fn new(path: Arc<str>) -> Result<Option<Self>> {
+        /// Create a new [`PidFile`].
+        pub(crate) fn new(path: Arc<str>) -> Result<Option<Arc<Self>>> {
             let instance = match fs::OpenOptions::new()
                 .create(true)
                 .read(true)
@@ -343,34 +344,28 @@ mod unix {
                         )
                     };
 
-                    let mut buf = String::new();
-
-                    let read = instance
-                        .read_to_string(&mut buf)
-                        .context("read PID file error")?;
-
                     let current_process_id = process::id();
-                    if read != 0 {
-                        if let Ok(pid) = buf.parse::<u32>() {
-                            if pid != process::id() {
-                                tracing::warn!(pid, "Has other instance running?");
-                                if Path::new(&format!("/proc/{pid}/status")).exists() {
-                                    bail!("Has other instance running.")
-                                } else {
-                                    instance
-                                        .set_len(0)
-                                        .context("truncate existing file error")?;
-                                }
-                            } else {
-                                return Ok(None);
-                            }
-                        } else {
-                            bail!("Invalid existing file content: {buf}")
+
+                    // Validate the existing PID
+                    {
+                        let process_id = {
+                            let mut buf = String::new();
+                            instance
+                                .read_to_string(&mut buf)
+                                .context("Read PID file error")?;
+                            buf.parse::<u32>().unwrap_or_default()
+                        };
+
+                        if process_id != current_process_id
+                            && Path::new(&format!("/proc/{process_id}/status")).exists()
+                        {
+                            bail!("There's another instance running, PID is {process_id}")
                         }
-                    } else {
-                        // no op
                     }
 
+                    instance
+                        .set_len(0)
+                        .context("Truncate existing file error")?;
                     instance
                         .write_all(current_process_id.to_string().as_bytes())
                         .expect("must success when writting pid file");
@@ -379,15 +374,14 @@ mod unix {
                 }
                 Err(e) => {
                     // TODO: which error id OK?
-                    bail!(anyhow!("Read file {path} error").context(e))
+                    bail!(anyhow!("Read file `{path}` error").context(e))
                 }
             };
 
-            Ok(Some(Self { path, instance }))
+            Ok(Some(Arc::new(Self { path, instance })))
         }
     }
 
-    #[cfg(unix)]
     impl Drop for PidFile {
         fn drop(&mut self) {
             let _ = self.instance.unlock().inspect_err(|e| {

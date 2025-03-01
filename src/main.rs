@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     tracing::info!("{} built at {}", utils::VERSION, utils::BUILD_TIME);
 
     // init global config from cmdline args or config file
-    let initialized = config::Cli::try_init()?;
+    let initialized = config::Config::try_init()?;
 
     if !initialized {
         return Ok(());
@@ -109,25 +109,40 @@ async fn conn_handler(mut incoming: TcpStream, remote_addr: SocketAddr, instant:
     let relay_conn = {
         tracing::debug!(elapsed = ?instant.elapsed(), "Start to peek SNI");
 
-        let peeked_sni = match peek::TcpStreamPeeker::new(&mut incoming)
+        macro_rules! default_upstream {
+            (HTTPS) => {
+                default_upstream!({
+                    use tokio::io::AsyncWriteExt;
+
+                    if let Err(e) = incoming
+                        .write_all(&[0x15, 0x03, 0x01, 0x00, 0x02, 0x02, 0x28])
+                        .await
+                    {
+                        tracing::error!("Write TLS Alert error: {e:?}");
+                    };
+                })
+            };
+            ($($block:block)?) => {{
+                let default_upstream = config::DEFAULT_UPSTREAM.load();
+                match default_upstream.as_ref() {
+                    Some(upstream) => upstream.connect().await,
+                    None => {
+                        $($block)?
+
+                        tracing::trace!(elapsed = ?instant.elapsed(), "Drop connection for now.");
+
+                        return;
+                    }
+                }
+            }};
+        }
+
+        let relay_conn = match peek::TcpStreamPeeker::new(&mut incoming)
             .peek_sni()
             .await
             .unwrap_or_default()
         {
-            sni_name @ Some(_) => sni_name,
-            None => {
-                tracing::debug!("Not HTTPS.");
-
-                if config::HTTPS_ONLY.load(Ordering::Relaxed) {
-                    return;
-                }
-
-                None
-            }
-        };
-
-        let relay_conn = match peeked_sni {
-            Some(peeked_sni) => {
+            peek::PeekedSni::Some(peeked_sni) => {
                 let peeked_sni = peeked_sni.as_ref();
                 tracing::debug!(
                     peeked_sni,
@@ -141,36 +156,31 @@ async fn conn_handler(mut incoming: TcpStream, remote_addr: SocketAddr, instant:
                             elapsed = ?instant.elapsed(),
                             upstream = ?upstream.value(),
                             peeked_sni,
-                            "Upstream matched"
+                            "Upstream matched."
                         );
 
                         upstream.connect().await
                     }
-                    _ => {
+                    None => {
                         tracing::debug!(
                             elapsed = ?instant.elapsed(),
                             peeked_sni,
-                            "No upstream matched"
+                            "No upstream matched."
                         );
 
-                        config::DEFAULT_UPSTREAM
-                            .load()
-                            .as_ref()
-                            .unwrap()
-                            .connect()
-                            .await
+                        default_upstream!(HTTPS)
                     }
                 }
             }
-            None => {
+            peek::PeekedSni::None => {
                 tracing::debug!(elapsed = ?instant.elapsed(), "SNI not found");
 
-                config::DEFAULT_UPSTREAM
-                    .load()
-                    .as_ref()
-                    .unwrap()
-                    .connect()
-                    .await
+                default_upstream!(HTTPS)
+            }
+            peek::PeekedSni::NotHTTPS => {
+                tracing::debug!(elapsed = ?instant.elapsed(), "Not HTTPS.");
+
+                default_upstream!()
             }
         };
 
@@ -220,7 +230,7 @@ async fn reload_handle() {
 
             tracing::info!("SIGHUP received, reloading config...");
 
-            match config::Cli::reload_config() {
+            match config::Config::reload() {
                 Ok(true) => {
                     tracing::info!("Config reloaded, restarting server...");
 
