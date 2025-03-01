@@ -73,7 +73,7 @@ pub(crate) fn create_listener() -> io::Result<TcpListener> {
     crate::apply_socket_conf!(&socket);
 
     socket.set_reuseaddr(true)?;
-    socket.set_reuseport(true)?;
+    // socket.set_reuseport(true)?;
 
     socket.bind(addr)?;
 
