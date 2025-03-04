@@ -8,11 +8,15 @@ rust-version = "1.85.0"
 # Basic deps
 anyhow = "1.0.96"
 arc-swap = "1.7.1"
+capnp = "0.20.4"
+capnp-rpc = "0.20.3"
 clap = { version = "4.5.31", features = ["derive"] }
 console-subscriber = { version = "0.4.1", features = ["parking_lot"], optional = true }
 const_for = "0.1.5"
 dashmap = { version = "6.1.0", features = ["inline", "serde"] }
 foldhash = "0.1.4"
+futures-util = { version = "0.3.31", default-features = false, features = ["io"] }
+human-format-next = "0.2.2"
 mimalloc = "0.1.43"
 rustls = { version = "=0.23.23", default-features = false, features = ["std"] }
 serde = { version = "1.0.218", features = ["derive", "rc"] }
@@ -29,6 +33,7 @@ tokio = { version = "1.43.0", features = [
     "parking_lot",
     "io-util",
 ] }
+tokio-util = { version = "0.7.13", features = ["compat"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["chrono", "env-filter", "parking_lot"] }
 
@@ -41,6 +46,7 @@ tokio-splice = "0.2.1"
 
 [build-dependencies]
 anyhow = "1.0.96"
+capnpc = "0.20.1"
 chrono = "0.4.40"
 
 [features]

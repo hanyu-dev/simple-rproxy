@@ -3,6 +3,8 @@
   // ! For most circumstance you needn't specify pid_file.
   // "pid_file": "/dev/shm/simple-rproxy/current.pid",
   "listen": "0.0.0.0:443",
+  // ! To get metrics
+  "metrics_listen": "0.0.0.0:9000",
   // ! Notice: if `default_upstream` is not set, we will reject HTTPS with TLS alert and drop the connection immediately.
   // "default_upstream": {
   //   "addr": "127.0.0.1:8443",

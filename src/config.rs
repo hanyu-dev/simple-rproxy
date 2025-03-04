@@ -1,7 +1,7 @@
 use std::{
     env::var,
     fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::Path,
     sync::{Arc, LazyLock},
 };
@@ -83,6 +83,10 @@ fn default_listen() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 443))
 }
 
+fn default_metrics_listen() -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], 9000))
+}
+
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 /// Server config
@@ -98,6 +102,10 @@ pub(crate) struct Config {
     #[serde(default = "default_listen")]
     /// Local socket addr to bind to, default to be `0.0.0.0:443`.
     pub listen: SocketAddr,
+
+    #[serde(default = "default_metrics_listen")]
+    /// Local socket addr to bind to, default to be `0.0.0.0:443`.
+    pub metrics_listen: SocketAddr,
 
     #[serde(default)]
     /// Default upstream to connect to.
@@ -131,6 +139,18 @@ impl Config {
                 }
                 SubCommand::Version => {
                     tracing::info!("Server version: {}", VERSION);
+                }
+                SubCommand::Traffic { to_show } => {
+                    let mut metrics_listen = args.metrics_listen;
+                    if metrics_listen.ip().is_unspecified() {
+                        metrics_listen.set_ip(IpAddr::from([127, 0, 0, 1]));
+                    }
+
+                    tracing::info!(metrics_listen = ?metrics_listen, "Start printing traffics...");
+
+                    crate::metrics::print_traffics(metrics_listen, to_show);
+
+                    tracing::info!("Traffics printed...");
                 }
                 #[cfg(unix)]
                 SubCommand::Reload { pid } => {
@@ -181,6 +201,7 @@ impl Config {
 
                 let Cli {
                     listen,
+                    metrics_listen,
                     default_upstream,
                     upstream,
                     pid_file,
@@ -196,7 +217,8 @@ impl Config {
                 let config = Config {
                     version: CONFIG_VERSION,
                     pid_file: pid_file.unwrap_or_else(default_pid_file),
-                    listen: listen.unwrap_or_else(default_listen),
+                    listen,
+                    metrics_listen,
                     default_upstream,
                     upstreams,
                     config_file,
@@ -331,6 +353,7 @@ impl Config {
             #[cfg(unix)]
             pid_file: default_pid_file(),
             listen: default_listen(),
+            metrics_listen: default_metrics_listen(),
             default_upstream: None,
             upstreams,
             config_file: "./config.json".into(), // actually no need?
@@ -381,9 +404,13 @@ pub(crate) struct Cli {
     /// command line args.
     pub config_file: Arc<str>,
 
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = default_listen())]
     /// Local socket addr to bind to, default to be `0.0.0.0:443`.
-    pub listen: Option<SocketAddr>,
+    pub listen: SocketAddr,
+
+    #[arg(long, default_value_t = default_metrics_listen())]
+    /// Local socket addr to bind to, default to be `0.0.0.0:443`.
+    pub metrics_listen: SocketAddr,
 
     #[arg(short, long, value_parser = Upstream::parse)]
     /// Default upstream to connect to.
@@ -414,7 +441,7 @@ pub(crate) struct Cli {
     subcommand: Option<SubCommand>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[derive(clap::Subcommand)]
 enum SubCommand {
     /// Generate exxample config file.
@@ -422,6 +449,13 @@ enum SubCommand {
 
     /// Print version and exit.
     Version,
+
+    /// Print metrics: traffic.
+    Traffic {
+        #[arg(long, default_value_t = 50)]
+        /// The top `{to_show}`ed items
+        to_show: usize,
+    },
 
     #[cfg(unix)]
     /// Reload

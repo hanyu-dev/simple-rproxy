@@ -1,11 +1,14 @@
 //! Simple-RProxy
 
 #![feature(const_vec_string_slice)]
+#![feature(ip_as_octets)]
+#![feature(slice_as_array)]
 
 mod config;
 mod error;
 mod metrics;
 mod peek;
+mod proto;
 mod relay;
 mod utils;
 
@@ -26,8 +29,7 @@ use tokio::{net::TcpStream, task::JoinHandle};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     utils::init_tracing();
 
     tracing::info!("{} built at {}", utils::VERSION, utils::BUILD_TIME);
@@ -39,9 +41,20 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Init metrics collector and exporter
-    metrics::init_metrics().await;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
 
+    // Init metrics collector and exporter
+    rt.block_on(metrics::init_metrics_channel());
+    metrics::init_metrics_server();
+
+    rt.block_on(main_tasks())?;
+
+    Ok(())
+}
+
+async fn main_tasks() -> Result<()> {
     // create relay server.
     run().await?;
 

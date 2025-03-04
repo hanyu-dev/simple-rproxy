@@ -294,6 +294,16 @@ pub(crate) struct Traffic {
     pub rx: u64,
 }
 
+impl Traffic {
+    /// Create [`Traffic`] from [`AtomicTraffic`].
+    pub(crate) fn from_atomic(traffic: &AtomicTraffic) -> Self {
+        Self {
+            tx: traffic.tx.load(Ordering::Relaxed),
+            rx: traffic.rx.load(Ordering::Relaxed),
+        }
+    }
+}
+
 #[derive(Debug)]
 /// Traffic
 pub(crate) struct AtomicTraffic {
@@ -302,6 +312,7 @@ pub(crate) struct AtomicTraffic {
 }
 
 impl AtomicTraffic {
+    /// Create a new [`AtomicTraffic`]
     pub(crate) const fn new(traffic: Traffic) -> Self {
         Self {
             tx: AtomicU64::new(traffic.tx),

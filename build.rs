@@ -7,6 +7,15 @@ use anyhow::Result;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     gen_server_version()?;
 
+    println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-changed=./proto/metrics.capnp");
+
+    capnpc::CompilerCommand::new()
+        .file("./proto/metrics.capnp")
+        .output_path("./src")
+        .default_parent_module(vec!["proto".to_string()])
+        .run()?;
+
     Ok(())
 }
 
