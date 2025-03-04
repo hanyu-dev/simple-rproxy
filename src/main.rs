@@ -4,6 +4,7 @@
 
 mod config;
 mod error;
+mod metrics;
 mod peek;
 mod relay;
 mod utils;
@@ -37,6 +38,9 @@ async fn main() -> Result<()> {
     if !initialized {
         return Ok(());
     }
+
+    // Init metrics collector and exporter
+    metrics::init_metrics().await;
 
     // create relay server.
     run().await?;
@@ -195,24 +199,29 @@ async fn conn_handler(mut incoming: TcpStream, remote_addr: SocketAddr, instant:
 
     tracing::debug!(elapsed = ?instant.elapsed(), "Upstream connected.");
 
-    if let Err(e) = relay_conn.relay_io(incoming).await {
-        match e.downcast_ref::<io::Error>().map(|e| e.kind()) {
-            Some(io::ErrorKind::BrokenPipe) => {
-                // Some poor implemented client will do so.
-                tracing::debug!("Connection closed unexpectedly");
-
-                return;
-            }
-            Some(io::ErrorKind::ConnectionReset) => {
-                // Some poor implemented client will do so.
-                tracing::debug!("Connection reset by peer");
-
-                return;
-            }
-            _ => {}
+    match relay_conn.relay_io(incoming, remote_addr).await {
+        Ok(traffic) => {
+            send_metric!(remote_addr.ip(), traffic);
         }
+        Err(e) => {
+            match e.downcast_ref::<io::Error>().map(|e| e.kind()) {
+                Some(io::ErrorKind::BrokenPipe) => {
+                    // Some poor implemented client will do so.
+                    tracing::debug!("Connection closed unexpectedly");
 
-        tracing::error!("Unexpected error: {e:#?}");
+                    return;
+                }
+                Some(io::ErrorKind::ConnectionReset) => {
+                    // Some poor implemented client will do so.
+                    tracing::debug!("Connection reset by peer");
+
+                    return;
+                }
+                _ => {}
+            }
+
+            tracing::error!("Unexpected error: {e:#?}");
+        }
     }
 }
 

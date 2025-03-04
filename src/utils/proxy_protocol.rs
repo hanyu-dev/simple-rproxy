@@ -8,10 +8,7 @@ use const_for::const_for;
 /// Encode PROXY protocol header.
 ///
 /// Currently we only suoport PROXY protocol v2.
-pub(crate) const fn encode_v2(
-    src: SocketAddr,
-    dst: SocketAddr,
-) -> Option<(usize, [u8; 64])> {
+pub(crate) const fn encode_v2(src: SocketAddr, dst: SocketAddr) -> Option<(usize, [u8; 64])> {
     let mut buf: [u8; 64] = [
         13, 10, 13, 10, 0, 13, 10, 81, 85, 73, 84, 10,   // b"\r\n\r\n\x00\r\nQUIT\n"
         0x21, // Protocol version = v2, Command = PROXY
@@ -120,10 +117,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(&buf[..len], &[
-            13, 10, 13, 10, 0, 13, 10, 81, 85, 73, 84, 10, 33, 33, 0, 36, 32, 1, 13, 184, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 210, 22,
-            46
-        ]);
+        assert_eq!(
+            &buf[..len],
+            &[
+                13, 10, 13, 10, 0, 13, 10, 81, 85, 73, 84, 10, 33, 33, 0, 36, 32, 1, 13, 184, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4,
+                210, 22, 46
+            ]
+        );
     }
 }

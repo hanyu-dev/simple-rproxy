@@ -1,13 +1,17 @@
 //! Bridge between the client and upstream
 
-use std::io;
+use std::{io, net::SocketAddr};
 
 use anyhow::{Context, Result, anyhow};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
-use crate::{apply_socket_conf, config::ADV_ENABLE_ZERO_COPY, utils::proxy_protocol::encode_v2};
+use crate::{
+    apply_socket_conf,
+    config::ADV_ENABLE_ZERO_COPY,
+    utils::{Traffic, proxy_protocol::encode_v2},
+};
 
 /// Connected to a destination.
 pub(crate) enum RelayConn {
@@ -50,11 +54,15 @@ impl RelayConn {
     #[tracing::instrument(level = "debug", skip_all)]
     #[inline]
     /// Perform IO relay between the client and the destination.
-    pub async fn relay_io(self, mut incoming: TcpStream) -> Result<()> {
+    pub async fn relay_io(
+        self,
+        mut incoming: TcpStream,
+        remote_addr: SocketAddr,
+    ) -> Result<Traffic> {
         macro_rules! do_relay_io {
             ($incoming:expr, $dest_stream:expr, $proxy_protocol:expr) => {{
                 if $proxy_protocol {
-                    let (len, buf) = encode_v2($incoming.peer_addr()?, $incoming.local_addr()?)
+                    let (len, buf) = encode_v2(remote_addr, $incoming.local_addr()?)
                         .expect("Socket address, addr family match");
 
                     $dest_stream
@@ -80,7 +88,7 @@ impl RelayConn {
                                 "Zero-copy bidirectional io closed, tx: {tx} bytes, rx: {rx} bytes"
                             );
 
-                            return Ok(());
+                            return Ok(Traffic { tx, rx });
                         }
                         Err(e) => match e.kind() {
                             io::ErrorKind::InvalidInput => {
@@ -101,6 +109,8 @@ impl RelayConn {
                         tracing::debug!(
                             "Bidirectional io with buffer closed, tx: {tx} bytes, rx: {rx} bytes"
                         );
+
+                        Traffic { tx, rx }
                     })
                     .context("`copy_bidirectional` data failed")
             }};

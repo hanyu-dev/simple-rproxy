@@ -208,7 +208,9 @@ impl<'tcp> TcpStreamPeeker<'tcp> {
 
                 // `swap_remove` is O(1) operation
                 return match server_names.swap_remove(idx).into_payload() {
-                    handshake::ServerNamePayload::HostName(host_name) => Ok(PeekedSni::Some(host_name)),
+                    handshake::ServerNamePayload::HostName(host_name) => {
+                        Ok(PeekedSni::Some(host_name))
+                    }
                     _ => {
                         #[allow(unsafe_code, reason = "have checked the item located at the idx")]
                         unsafe {

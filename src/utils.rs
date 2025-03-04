@@ -6,7 +6,10 @@ use std::{
     fmt, io,
     net::SocketAddr,
     str::FromStr,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -281,6 +284,35 @@ impl FromStr for UpstreamArg {
             sni: sni.into(),
             upstream: Upstream::parse(upstream)?.into(),
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+/// Traffic
+pub(crate) struct Traffic {
+    pub tx: u64,
+    pub rx: u64,
+}
+
+#[derive(Debug)]
+/// Traffic
+pub(crate) struct AtomicTraffic {
+    pub tx: AtomicU64,
+    pub rx: AtomicU64,
+}
+
+impl AtomicTraffic {
+    pub(crate) const fn new(traffic: Traffic) -> Self {
+        Self {
+            tx: AtomicU64::new(traffic.tx),
+            rx: AtomicU64::new(traffic.rx),
+        }
+    }
+
+    /// fetch and add [`AtomicTraffic`]
+    pub(crate) fn fetch_add(&self, traffic: Traffic) {
+        self.tx.fetch_add(traffic.tx, Ordering::Relaxed);
+        self.rx.fetch_add(traffic.rx, Ordering::Relaxed);
     }
 }
 
