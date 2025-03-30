@@ -288,6 +288,7 @@ impl FromStr for UpstreamArg {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[derive(rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 /// Traffic
 pub(crate) struct Traffic {
     pub tx: u64,
@@ -301,6 +302,12 @@ impl Traffic {
             tx: traffic.tx.load(Ordering::Relaxed),
             rx: traffic.rx.load(Ordering::Relaxed),
         }
+    }
+
+    #[inline]
+    /// Calculate total traffic
+    pub(crate) const fn total(&self) -> u64 {
+        self.tx + self.rx
     }
 }
 

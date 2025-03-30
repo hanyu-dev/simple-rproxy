@@ -11,8 +11,15 @@ use arc_swap::ArcSwapOption;
 use clap::Parser;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncBufReadExt, BufStream},
+    net::TcpStream,
+};
 
-use crate::utils::{Upstream, UpstreamArg, VERSION};
+use crate::{
+    metrics,
+    utils::{Upstream, UpstreamArg, VERSION},
+};
 
 /// type alia: upstream map
 type UpstreamMap = DashMap<Arc<str>, Arc<Upstream>, foldhash::fast::RandomState>;
@@ -126,7 +133,7 @@ impl Config {
     /// Try init config from config file or CLI args.
     ///
     /// Return `true` if can start or restart the server.
-    pub(crate) fn try_init() -> Result<bool> {
+    pub(crate) async fn try_may_init() -> Result<bool> {
         let mut args = Cli::parse();
 
         // * Handle sub command
@@ -140,7 +147,7 @@ impl Config {
                 SubCommand::Version => {
                     tracing::info!("Server version: {}", VERSION);
                 }
-                SubCommand::Traffic { to_show } => {
+                SubCommand::Traffic => {
                     let mut metrics_listen = args.metrics_listen;
                     if metrics_listen.ip().is_unspecified() {
                         metrics_listen.set_ip(IpAddr::from([127, 0, 0, 1]));
@@ -148,7 +155,26 @@ impl Config {
 
                     tracing::info!(metrics_listen = ?metrics_listen, "Start printing traffics...");
 
-                    crate::metrics::print_traffics(metrics_listen, to_show);
+                    let mut buf = vec![];
+
+                    // read data from running instance
+                    {
+                        let mut outgoing = TcpStream::connect(metrics_listen).await?;
+
+                        metrics::MetricsReq::Traffics
+                            .write_data(&mut outgoing)
+                            .await?;
+
+                        let mut outgoing = BufStream::new(&mut outgoing);
+
+                        outgoing.read_until(b'\n', &mut buf).await?;
+                    }
+
+                    println!(
+                        "{}",
+                        metrics::TrafficDatas::access(buf.trim_ascii_end())
+                            .context("invalid data returned")?
+                    );
 
                     tracing::info!("Traffics printed...");
                 }
@@ -450,12 +476,10 @@ enum SubCommand {
     /// Print version and exit.
     Version,
 
-    /// Print metrics: traffic.
-    Traffic {
-        #[arg(long, default_value_t = 50)]
-        /// The top `{to_show}`ed items
-        to_show: usize,
-    },
+    /// Print metrics: traffic (top 50).
+    ///
+    /// You may specify env `SHOW_TRAFFICS` to see custom records of traffic.
+    Traffic,
 
     #[cfg(unix)]
     /// Reload

@@ -1,14 +1,13 @@
 //! Simple-RProxy
 
-#![feature(const_vec_string_slice)]
 #![feature(ip_as_octets)]
 #![feature(slice_as_array)]
+#![feature(file_lock)]
 
 mod config;
 mod error;
 mod metrics;
 mod peek;
-mod proto;
 mod relay;
 mod utils;
 
@@ -29,29 +28,23 @@ use tokio::{net::TcpStream, task::JoinHandle};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     utils::init_tracing();
 
     tracing::info!("{} built at {}", utils::VERSION, utils::BUILD_TIME);
 
     // init global config from cmdline args or config file
-    let initialized = config::Config::try_init()?;
+    let initialized = config::Config::try_may_init().await?;
 
     if !initialized {
         return Ok(());
     }
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    // init traffic metric, etc
+    metrics::init_metrics().await;
 
-    // Init metrics collector and exporter
-    rt.block_on(metrics::init_metrics_channel());
-    metrics::init_metrics_server();
-
-    rt.block_on(main_tasks())?;
-
-    Ok(())
+    main_tasks().await
 }
 
 async fn main_tasks() -> Result<()> {
