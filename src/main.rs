@@ -1,14 +1,16 @@
 //! Simple-RProxy
 
-#![feature(ip_as_octets)]
-#![feature(slice_as_array)]
 #![feature(file_lock)]
+#![feature(ip_as_octets)]
+#![feature(result_flattening)]
+#![feature(slice_as_array)]
 
 mod config;
 mod error;
 mod metrics;
 mod peek;
 mod relay;
+// mod server;
 mod utils;
 
 use std::{
@@ -18,12 +20,12 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
 use mimalloc::MiMalloc;
-use tokio::{net::TcpStream, task::JoinHandle};
+use tokio::{io::AsyncWriteExt, net::TcpStream, task::JoinHandle, time::sleep};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -66,6 +68,7 @@ async fn main_tasks() -> Result<()> {
 
 /// [`JoinHandle`] after spawning the server.
 static SERVER_HANDLE: Mutex<Option<(JoinHandle<()>, Arc<AtomicBool>)>> = Mutex::new(None);
+static FATAL_ERROR_SENDER: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 async fn run() -> Result<()> {
@@ -74,7 +77,7 @@ async fn run() -> Result<()> {
     let listener = utils::create_listener()?;
     let canceller_rx = canceller_tx.clone();
     let handler = tokio::spawn(async move {
-        loop {
+        let has_error = loop {
             let (incoming, remote_addr) = match listener.accept().await {
                 Ok(accepted) => accepted,
                 Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => {
@@ -83,7 +86,7 @@ async fn run() -> Result<()> {
                 }
                 Err(e) => {
                     tracing::error!("Failed to accept: {:#?}", e);
-                    break;
+                    break true;
                 }
             };
 
@@ -93,11 +96,15 @@ async fn run() -> Result<()> {
             tokio::spawn(conn_handler(incoming, remote_addr, instant));
 
             if canceller_rx.load(Ordering::Relaxed) {
-                break;
+                break false;
             }
-        }
+        };
 
-        tracing::info!("Current server loop has exited.");
+        tracing::error!("Current server loop has exited.");
+
+        if has_error {
+            FATAL_ERROR_SENDER.store(true, Ordering::Relaxed);
+        }
     });
 
     let last = SERVER_HANDLE
@@ -147,13 +154,13 @@ async fn conn_handler(mut incoming: TcpStream, remote_addr: SocketAddr, instant:
             }};
         }
 
-        let relay_conn = match peek::TcpStreamPeeker::new(&mut incoming)
-            .peek_sni()
-            .await
-            .unwrap_or_default()
-        {
-            peek::PeekedSni::Some(peeked_sni) => {
-                let peeked_sni = peeked_sni.as_ref();
+        let relay_conn = match peek::peek_with_timeout(&mut incoming, None).await {
+            Ok(peek::Peeked::Tls {
+                host_name: Some(host_name),
+                maybe_reality: _,
+            }) => {
+                let peeked_sni = host_name.as_str();
+
                 tracing::debug!(
                     peeked_sni,
                     elapsed = ?instant.elapsed(),
@@ -182,15 +189,43 @@ async fn conn_handler(mut incoming: TcpStream, remote_addr: SocketAddr, instant:
                     }
                 }
             }
-            peek::PeekedSni::None => {
-                tracing::debug!(elapsed = ?instant.elapsed(), "SNI not found");
-
+            Ok(peek::Peeked::Tls {
+                host_name: None,
+                maybe_reality: _,
+            }) => {
                 default_upstream!(HTTPS)
             }
-            peek::PeekedSni::NotHTTPS => {
-                tracing::debug!(elapsed = ?instant.elapsed(), "Not HTTPS.");
+            Ok(peek::Peeked::MaybeHttp) => {
+                // TODO: Write error response
 
-                default_upstream!()
+                tracing::debug!(elapsed = ?instant.elapsed(), "Maybe HTTP, write 403 rejection");
+
+                let _ = incoming
+                    .write_all(
+                        b"HTTP/1.1 400 The plain HTTP request was sent to HTTPS port\r\n\r\n",
+                    )
+                    .await
+                    .inspect_err(|e| {
+                        tracing::error!("Failed to write HTTP response: {e:?}");
+                    });
+
+                tracing::debug!(elapsed = ?instant.elapsed(), "HTTP response sent");
+
+                let _ = incoming.shutdown().await.inspect_err(|e| {
+                    tracing::error!("Failed to shutdown: {e:?}");
+                });
+
+                return;
+            }
+            Ok(_peeked) => {
+                tracing::debug!(elapsed = ?instant.elapsed(), "Not implemented, reject it");
+
+                return;
+            }
+            _ => {
+                tracing::debug!(elapsed = ?instant.elapsed(), "Unknown connection type or error, shutdown");
+
+                return;
             }
         };
 
@@ -288,6 +323,15 @@ async fn termination_handle() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+        () = async {
+            loop {
+                sleep(Duration::from_secs(1)).await;
+
+                if FATAL_ERROR_SENDER.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        } => {},
     }
 
     tracing::info!("signal received, shutdown");

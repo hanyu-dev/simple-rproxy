@@ -80,15 +80,17 @@ impl RelayConn {
 
                 #[cfg(unix)]
                 if *ADV_ENABLE_ZERO_COPY {
-                    match tokio_splice::zero_copy_bidirectional(&mut $incoming, &mut $dest_stream)
-                        .await
+                    match tokio_splice2::copy_bidirectional(&mut $incoming, &mut $dest_stream).await
                     {
                         Ok((tx, rx)) => {
                             tracing::debug!(
                                 "Zero-copy bidirectional io closed, tx: {tx} bytes, rx: {rx} bytes"
                             );
 
-                            return Ok(Traffic { tx, rx });
+                            return Ok(Traffic {
+                                tx: tx as _,
+                                rx: rx as _,
+                            });
                         }
                         Err(e) => match e.kind() {
                             io::ErrorKind::InvalidInput => {

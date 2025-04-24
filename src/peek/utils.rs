@@ -1,100 +1,175 @@
-use std::fmt;
+//! Some utils
 
-use rustls::internal::msgs::codec::Reader;
+use std::{cmp::min, hint::unreachable_unchecked};
 
+use anyhow::{Result, bail};
+use tokio::net::TcpStream;
+
+use crate::error::Error;
+
+#[derive(Debug)]
+/// Wrapper over a slice of bytes that allows reading chunks from
+/// with the current position state held using a cursor.
+///
+/// A new reader for a sub section of the buffer can be created
+/// using the `sub` function or a section of a certain length can
+/// be obtained using the `take` function
 pub(super) struct ReaderExt {
-    /// Inner buffer
-    inner: Vec<u8>,
-
-    /// [`Reader`] for rustls
-    reader: Reader<'static>,
-
-    /// Stat: `last_cursor`
-    last_cursor: usize,
-}
-
-impl fmt::Debug for ReaderExt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReaderExt")
-            .field("has_peeked", &self.inner.len())
-            .field("current_cursor", &self.reader.used())
-            .field("last_cursor", &self.last_cursor)
-            .finish()
-    }
+    /// The underlying buffer storing the readers content
+    buffer: Vec<u8>,
+    /// Stores the current reading position for the buffer
+    cursor: usize,
+    /// Maximum size of the buffer
+    maximum: usize,
 }
 
 impl ReaderExt {
-    #[inline]
-    pub(super) const fn new() -> Self {
+    /// Creates a new Reader of the provided `bytes` slice with
+    /// the initial cursor position of zero.
+    pub(super) const fn new(maximum: usize) -> Self {
         Self {
-            inner: Vec::new(),
-            reader: Reader::init(&[]),
-            last_cursor: 0,
+            buffer: Vec::new(),
+            cursor: 0,
+            maximum,
         }
     }
 
-    #[inline]
-    #[allow(unsafe_code, reason = "callee guaranteed")]
-    pub(super) fn set_cursor(&mut self, cursor: usize) -> Option<()> {
-        self.reader.take(cursor)?;
-        self.last_cursor = cursor;
-        Some(())
-    }
+    #[tracing::instrument(level = "debug", skip_all, err)]
+    /// Peek and fill the buffer.
+    pub(super) async fn fill_more_data(
+        &mut self,
+        stream: &mut TcpStream,
+        additional: usize,
+    ) -> Result<bool> {
+        let current_length = self.buffer.len();
 
-    #[inline]
-    pub(super) fn as_mut_slice(&mut self, target_len: usize) -> &mut [u8] {
-        debug_assert!(target_len > 0);
+        // check if we have peeked enough data
+        if current_length >= self.maximum {
+            return Ok(false);
+        }
 
-        self.inner.reserve(target_len);
+        self.buffer.reserve(additional);
 
-        #[allow(unsafe_code, reason = "callee guaranteed")]
-        #[allow(
-            clippy::uninit_vec,
-            reason = "callee guaranteed: will set actual len later"
-        )]
+        #[allow(unsafe_code, reason = "will set actual len later")]
         unsafe {
-            self.inner.set_len(target_len);
+            let target_length = min(current_length + additional, self.maximum);
+            self.buffer.set_len(target_length);
         }
 
-        self.inner.as_mut_slice()
-    }
+        let has_peeked = stream.peek(&mut self.buffer).await?;
 
-    #[inline]
-    pub(super) fn update_buffer(&mut self, new_len: usize, is_retry: bool) {
-        #[allow(unsafe_code, reason = "callee guaranteed")]
-        unsafe {
-            self.inner.set_len(new_len);
-        }
+        // peek will return the same content as has peeked one
+        debug_assert!(has_peeked >= current_length);
 
-        let cursor = if is_retry {
-            self.last_cursor
+        if has_peeked <= current_length {
+            bail!(Error::Peek("No more data peeked"))
         } else {
-            self.reader.used()
-        };
-
-        self.reader = Reader::init(
-            #[allow(
-                unsafe_code,
-                reason = "self.reader will be dropped together with self.inner"
-            )]
+            #[allow(unsafe_code, reason = "set actual len")]
             unsafe {
-                std::slice::from_raw_parts(self.inner.as_ptr(), self.inner.len())
-            },
-        );
+                self.buffer.set_len(has_peeked);
+            }
+        }
 
-        // set the cursor
-        self.reader.take(cursor);
+        Ok(true)
     }
 
     #[inline]
-    pub(super) const fn reader(&mut self) -> &mut Reader<'static> {
-        self.last_cursor = self.reader.used();
-        &mut self.reader
+    /// Read single byte from the buffer and move the cursor if success.
+    pub(super) fn read_u8(&mut self) -> Option<u8> {
+        let data = self.buffer.get(self.cursor).copied()?;
+
+        self.cursor += 1;
+
+        Some(data)
+    }
+
+    #[inline]
+    /// Read 2 bytes as u16 from the buffer and move the cursor if success.
+    pub(super) fn read_u16(&mut self) -> Option<u16> {
+        let data = self
+            .buffer
+            .get(self.cursor..self.cursor + 2)?
+            .as_array::<2>()
+            .map(|&b| u16::from_be_bytes(b))
+            .unwrap_or_else(|| {
+                #[allow(unsafe_code, reason = "must be 2 bytes")]
+                unsafe {
+                    unreachable_unchecked()
+                }
+            });
+
+        self.cursor += 2;
+
+        Some(data)
+    }
+
+    #[inline]
+    /// Read a slice of bytes from the buffer and move the cursor if success.
+    /// The length of the slice is read from the first two bytes as a `u8`.
+    pub(super) fn read_payload_u8(&mut self) -> Result<&[u8], Option<IncompletePayload<'_>>> {
+        let length = self.read_u8().ok_or(None)? as usize;
+
+        let payload = self.buffer.get(self.cursor..self.cursor + length);
+
+        match payload {
+            Some(payload) => {
+                self.cursor += length;
+
+                Ok(payload)
+            }
+            None => {
+                // Reset the current cursor to the start of the payload (length info)
+                self.cursor -= 1;
+
+                Err(Some(IncompletePayload {
+                    len: length,
+                    payload: self.buffer.get(self.cursor..).unwrap_or(&[]),
+                }))
+            }
+        }
+    }
+
+    #[inline]
+    /// Read a slice of bytes from the buffer and move the cursor if success.
+    /// The length of the slice is read from the first two bytes as a `u16`.
+    pub(super) fn read_payload_u16(&mut self) -> Result<&[u8], Option<IncompletePayload<'_>>> {
+        let length = self.read_u16().ok_or(None)? as usize;
+
+        let payload = self.buffer.get(self.cursor..self.cursor + length);
+
+        match payload {
+            Some(payload) => {
+                self.cursor += length;
+
+                Ok(payload)
+            }
+            None => {
+                // Reset the current cursor to the start of the payload (length info)
+                self.cursor -= 2;
+
+                Err(Some(IncompletePayload {
+                    len: length,
+                    payload: self.buffer.get(self.cursor..).unwrap_or(&[]),
+                }))
+            }
+        }
+    }
+
+    pub(super) fn skip(&mut self, length: usize) -> Option<()> {
+        let new_cursor = self.cursor + length;
+
+        if new_cursor > self.buffer.len() {
+            return None;
+        }
+
+        self.cursor = new_cursor;
+
+        Some(())
     }
 }
 
-impl Drop for ReaderExt {
-    fn drop(&mut self) {
-        self.reader = Reader::init(&[]);
-    }
+#[derive(Debug, Clone, Copy)]
+pub(super) struct IncompletePayload<'a> {
+    pub len: usize,
+    pub payload: &'a [u8],
 }
